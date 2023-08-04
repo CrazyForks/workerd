@@ -361,4 +361,9 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   # The client stub is currently guarded by the experimental flag, however, we don't want to let
   # experimental clients call JS methods over RPC if the Worker receiving the request hasn't
   # explicitly exposed its methods to RPC.
+
+  durableObjectDestroy @40 :Bool
+    $compatEnableFlag("durable_object_destroy")
+    $experimental;
+  # Enables namespace.destroy(id) durable object experimental API.
 }
