@@ -9,6 +9,7 @@
 #include <workerd/jsg/util.h>
 #include <workerd/jsg/setup.h>
 #include <workerd/api/actor.h>
+#include <workerd/api/actor-destroy.h>
 #include <workerd/api/actor-state.h>
 #include <workerd/api/analytics-engine.h>
 #include <workerd/api/cache.h>

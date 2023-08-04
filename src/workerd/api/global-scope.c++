@@ -14,6 +14,7 @@
 #include <workerd/jsg/async-context.h>
 #include <workerd/jsg/ser.h>
 #include <workerd/jsg/util.h>
+#include <workerd/jsg/promise.h>
 #include <workerd/io/io-context.h>
 #include <workerd/io/features.h>
 #include <workerd/util/sentry.h>
@@ -23,6 +24,7 @@
 #include <workerd/util/stream-utils.h>
 #include <workerd/util/use-perfetto-categories.h>
 #include <workerd/util/uncaught-exception-source.h>
+#include <workerd/api/actor-destroy.h>
 
 namespace workerd::api {
 
@@ -550,6 +552,84 @@ void ServiceWorkerGlobalScope::sendHibernatableWebSocketError(
     }
     // We want to deliver an error, but if no webSocketError handler is exported, we shouldn't fail
   }
+}
+
+kj::Promise<WorkerInterface::CustomEvent::Result> ServiceWorkerGlobalScope::actorDestroy(Worker::Lock& lock,
+      kj::Maybe<ExportedHandler&> exportedHandler) {
+
+  auto& context = IoContext::current();
+  // TODO(now): After completing I'll need to destroy the actor to prevent any future events to be
+  // delivered.
+  // TODO(now): Prevent any other io events during destroy handler execution.
+  // auto& actor = KJ_ASSERT_NONNULL(context.getActor());
+
+  auto& handler = KJ_REQUIRE_NONNULL(exportedHandler);
+  if (handler.destroy == kj::none) {
+    lock.logWarningOnce(
+        "Calling actor destroy without any destroy() hander");
+    return WorkerInterface::CustomEvent::Result {
+      .outcome = EventOutcome::SCRIPT_NOT_FOUND
+    };
+  }
+
+
+  auto& destroy = KJ_ASSERT_NONNULL(handler.destroy);
+  auto actorDestroyResultPromise = context.run([exportedHandler, &destroy,
+            maybeAsyncContext = jsg::AsyncContextFrame::currentRef(lock)]
+            (Worker::Lock& lock) mutable -> kj::Promise<WorkerInterface::CustomEvent::Result> {
+    jsg::AsyncContextFrame::Scope asyncScope(lock, maybeAsyncContext);
+
+
+    return destroy(lock).then([]() -> kj::Promise<WorkerInterface::CustomEvent::Result> {
+      return WorkerInterface::CustomEvent::Result {
+        .outcome = EventOutcome::OK
+      };
+    });
+  });
+
+  return actorDestroyResultPromise;
+  //  actorDestroyResultPromise;
+  // } else {
+  //   KJ_DBG("CANCELED");
+  //   return WorkerInterface::CustomEvent::Result {
+  //     .outcome = EventOutcome::CANCELED
+  //   };
+  // }
+
+
+
+
+  // // IoContext::current().blockConcurrencyWhile(lock, [exportedHandler](jsg::Lock& js)
+  // //     mutable -> jsg::Promise<bool> {
+  //   auto event = jsg::alloc<ActorDestroyEvent>();
+  //   KJ_IF_SOME(h, exportedHandler) {
+  //     KJ_IF_SOME(handler, h.destroy) {
+
+  //   // return IoContext::current()
+  //   //     .run([exportedHandler, handler,
+  //   //           maybeAsyncContext = jsg::AsyncContextFrame::currentRef(lock)]
+  //   //          (Worker::Lock& lock) mutable -> kj::Promise<WorkerInterface::AlarmResult> {
+  //   //   jsg::AsyncContextFrame::Scope asyncScope(lock, maybeAsyncContext);
+  //   //   return handler(lock).then([]() -> kj::Promise<WorkerInterface::AlarmResult> {
+  //   //     return WorkerInterface::AlarmResult {
+  //   //       .retry = false,
+  //   //       .outcome = EventOutcome::OK
+  //   //     };
+  //   //   });
+  //   // });
+
+  //         // jsg::Lock& js(lock);
+
+  //     // IoContext::current().run()
+
+  //     IoContext::current().blockConcurrencyWhile(js, [](jsg::Lock& js){});
+  //       // auto promise = (*handler)(js);
+  //       auto promise = handler(lock);
+  //       event->waitUntil(kj::mv(promise));
+  //     }
+  //   }
+  //   return js.resolvedPromise(true);
+  // });
 }
 
 void ServiceWorkerGlobalScope::emitPromiseRejection(
