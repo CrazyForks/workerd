@@ -70,6 +70,8 @@ public:
   virtual void finishedWaitUntilTask() {}
 
   virtual void setFailedOpen(bool value) {}
+
+  virtual void clockRead() {}
 };
 
 class IsolateObserver: public kj::AtomicRefcounted, public jsg::IsolateObserver {
