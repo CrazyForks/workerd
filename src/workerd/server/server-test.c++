@@ -632,7 +632,7 @@ KJ_TEST("Server: serve basic modular Worker") {
       )
     ]
   ))"_kj));
-
+  KJ_EXPECT_LOG(ERROR, "Autogates not initialised, check for builtin-wasm-modules will have no effect");
   test.start();
   auto conn = test.connect("test-addr");
   conn.httpGet200("/", "Hello: http://foo/");
