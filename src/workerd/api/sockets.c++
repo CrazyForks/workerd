@@ -6,6 +6,7 @@
 #include "system-streams.h"
 #include <workerd/io/worker-interface.h>
 #include "url-standard.h"
+#include <workerd/util/autogate.h>
 
 
 namespace workerd::api {
@@ -262,7 +263,7 @@ jsg::Ref<Socket> connectImpl(
   return connectImplNoOutputLock(js, kj::mv(fetcher), kj::mv(address), kj::mv(options));
 }
 
-jsg::Promise<void> Socket::close(jsg::Lock& js) {
+jsg::Promise<void> Socket::closeImplOld(jsg::Lock& js) {
   // Forcibly close the readable/writable streams.
   auto cancelPromise = readable->getController().cancel(js, kj::none);
   auto abortPromise = writable->getController().abort(js, kj::none);
@@ -271,8 +272,53 @@ jsg::Promise<void> Socket::close(jsg::Lock& js) {
     return abortPromise.then(js, [this](jsg::Lock& js) {
       resolveFulfiller(js, kj::none);
       return js.resolvedPromise();
-    }, [this](jsg::Lock& js, jsg::Value err) { return errorHandler(js, kj::mv(err)); });
-  }, [this](jsg::Lock& js, jsg::Value err) { return errorHandler(js, kj::mv(err)); });
+    }, [this](jsg::Lock& js, jsg::Value err) {
+      errorHandler(js, kj::mv(err));
+      return js.resolvedPromise();
+    });
+  }, [this](jsg::Lock& js, jsg::Value err) {
+    errorHandler(js, kj::mv(err));
+    return js.resolvedPromise();
+  });
+}
+
+jsg::Promise<void> Socket::closeImplNew(jsg::Lock& js) {
+  if (isClosing) {
+    return closedPromiseCopy.whenResolved(js);
+  }
+
+  isClosing = true;
+
+  // Wait until the socket connects (successfully or otherwise)
+  return openedPromiseCopy.whenResolved(js).then(js, [this](jsg::Lock& js) {
+    auto flushPromise = js.resolvedPromise();
+    if (!writable->getController().isClosedOrClosing()) {
+      flushPromise = writable->getController().flush(js);
+    }
+    return flushPromise;
+  }).then(js, [this](jsg::Lock& js) {
+    // Forcibly abort the readable/writable streams.
+    auto cancelPromise = readable->getController().cancel(js, kj::none);
+    auto abortPromise = writable->getController().abort(js, kj::none);
+    // The below is effectively `Promise.all(cancelPromise, abortPromise)`
+    return cancelPromise.then(js,
+        [abortPromise = kj::mv(abortPromise)](jsg::Lock& js) mutable {
+      return kj::mv(abortPromise);
+    });
+  }).then(js, [this](jsg::Lock& js) {
+    resolveFulfiller(js, kj::none);
+    return js.resolvedPromise();
+  }).catch_(js, [this](jsg::Lock& js, jsg::Value err) {
+    errorHandler(js, kj::mv(err));
+  });
+}
+
+jsg::Promise<void> Socket::close(jsg::Lock& js) {
+  if (util::Autogate::isEnabled(util::AutogateKey::SOCKETS_AWAIT_PROXY_BEFORE_CLOSE)) {
+    return closeImplNew(js);
+  } else {
+    return closeImplOld(js);
+  }
 }
 
 jsg::Ref<Socket> Socket::startTls(jsg::Lock& js, jsg::Optional<TlsOptions> tlsOptions) {
