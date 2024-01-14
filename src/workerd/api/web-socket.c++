@@ -49,7 +49,8 @@ WebSocket::WebSocket(jsg::Lock& js,
       serializedAttachment(kj::mv(package.serializedAttachment)),
       farNative(initNative(ioContext, ws, package.closedOutgoingConnection)),
       outgoingMessages(IoContext::current().addObject(kj::heap<OutgoingMessagesMap>())),
-      locality(LOCAL) {}
+      locality(LOCAL),
+      maybeCriticalSection(ioContext.getCriticalSection()) {}
   // This constructor is used when reinstantiating a websocket that had been hibernating, which is
   // why we can go straight to the Accepted state. However, note that we are actually in the
   // `Hibernatable` "sub-state"!
@@ -65,7 +66,8 @@ WebSocket::WebSocket(kj::Own<kj::WebSocket> native, Locality locality)
     : url(kj::none),
       farNative(nullptr),
       outgoingMessages(IoContext::current().addObject(kj::heap<OutgoingMessagesMap>())),
-      locality(locality) {
+      locality(locality),
+      maybeCriticalSection(IoContext::current().getCriticalSection()) {
   auto nativeObj = kj::heap<Native>();
   nativeObj->state.init<AwaitingAcceptanceOrCoupling>(kj::mv(native));
   farNative = IoContext::current().addObject(kj::mv(nativeObj));
@@ -75,7 +77,8 @@ WebSocket::WebSocket(kj::String url, Locality locality)
     : url(kj::mv(url)),
       farNative(nullptr),
       outgoingMessages(IoContext::current().addObject(kj::heap<OutgoingMessagesMap>())),
-      locality(locality) {
+      locality(locality),
+      maybeCriticalSection(IoContext::current().getCriticalSection()) {
   auto nativeObj = kj::heap<Native>();
   nativeObj->state.init<AwaitingConnection>();
   farNative = IoContext::current().addObject(kj::mv(nativeObj));
@@ -887,6 +890,14 @@ kj::Promise<kj::Maybe<kj::Exception>> WebSocket::readLoop() {
         a.getMetrics().receivedWebSocketMessage(size);
       }
 
+      // If we called from a blockConcurrencyWhile callback, we need to get the critical section
+      // lock so this event counts as part of the callback. If we run it as a separate event,
+      // it will need to wait for the blockConcurrencyWhile to finish, but that event will be
+      // waiting on this new event resulting in a deadlock.
+      kj::Maybe<InputGate::Lock> csLock;
+      KJ_IF_SOME(cs, maybeCriticalSection) {
+        csLock = co_await cs.wait();
+      }
       // Re-enter the context with context.run(). This is arguably a bit unusual compared to other
       // I/O which is delivered by return from context.awaitIo(), but the difference here is that we
       // have a long stream of events over time. It makes sense to use context.run() each time a new
@@ -918,7 +929,7 @@ kj::Promise<kj::Maybe<kj::Exception>> WebSocket::readLoop() {
         }
 
         return true;
-      });
+      }, kj::mv(csLock));
 
       if (!result) co_return kj::none;
     }
