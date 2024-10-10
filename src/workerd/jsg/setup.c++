@@ -8,8 +8,11 @@
 #endif
 
 #include "setup.h"
-#include <workerd/util/uuid.h>
+
 #include "libplatform/libplatform.h"
+
+#include <workerd/util/uuid.h>
+
 #include <v8-cppgc.h>
 
 #if !_WIN32

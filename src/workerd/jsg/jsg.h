@@ -7,20 +7,23 @@
 //
 // Any files declaring an API to export to JavaScript will need to include this header.
 
-#include <kj/string.h>
-#include <kj/function.h>
-#include <kj/exception.h>
-#include <kj/one-of.h>
-#include <kj/debug.h>
-#include <type_traits>
-#include <v8.h>
-#include <v8-profiler.h>
-#include <workerd/jsg/memory.h>
 #include "macro-meta.h"
-#include "wrappable.h"
 #include "util.h"
+#include "wrappable.h"
 
 #include <workerd/jsg/exception.h>
+#include <workerd/jsg/memory.h>
+
+#include <v8-profiler.h>
+#include <v8.h>
+
+#include <kj/debug.h>
+#include <kj/exception.h>
+#include <kj/function.h>
+#include <kj/one-of.h>
+#include <kj/string.h>
+
+#include <type_traits>
 
 using kj::byte;
 using kj::uint;
@@ -2511,6 +2514,7 @@ public:
   void setCommonJsExportDefault(bool exportDefault);
 
   void setNodeJsCompatEnabled();
+  void setToStringTag();
 
   using Logger = void(Lock&, kj::StringPtr);
   void setLoggerCallback(kj::Function<Logger>&& logger);
@@ -2578,6 +2582,7 @@ public:
   JsSymbol symbolShared(kj::StringPtr) KJ_WARN_UNUSED_RESULT;
   JsSymbol symbolInternal(kj::StringPtr) KJ_WARN_UNUSED_RESULT;
   JsObject obj() KJ_WARN_UNUSED_RESULT;
+  JsObject objNoProto() KJ_WARN_UNUSED_RESULT;
   JsMap map() KJ_WARN_UNUSED_RESULT;
   JsValue external(void*) KJ_WARN_UNUSED_RESULT;
   JsValue error(kj::StringPtr message) KJ_WARN_UNUSED_RESULT;
@@ -2586,6 +2591,11 @@ public:
   JsDate date(double timestamp) KJ_WARN_UNUSED_RESULT;
   JsDate date(kj::Date date) KJ_WARN_UNUSED_RESULT;
   JsDate date(kj::StringPtr date) KJ_WARN_UNUSED_RESULT;
+
+  // Returns a JsObject that is backed internally by a v8::External object that
+  // takes ownership over the inner.
+  template <typename T>
+  JsObject opaque(T&& inner) KJ_WARN_UNUSED_RESULT;
 
   // Returns a jsg::BufferSource whose underlying JavaScript handle is a Uint8Array.
   BufferSource bytes(kj::Array<kj::byte> data) KJ_WARN_UNUSED_RESULT;
@@ -2630,6 +2640,8 @@ public:
   void runMicrotasks();
   void terminateExecution();
 
+  // Logs and reports the error to tail workers (if called within an request),
+  // the inspector (if attached), or to KJ_LOG(Info).
   virtual void reportError(const JsValue& value) = 0;
 
 private:
@@ -2783,6 +2795,7 @@ inline v8::Local<v8::Context> JsContext<T>::getHandle(Lock& js) {
 
 }  // namespace workerd::jsg
 
+// clang-format off
 // These two includes are needed for the JSG type glue macros to work.
 #include "buffersource.h"
 #include "modules.h"
@@ -2793,3 +2806,4 @@ inline v8::Local<v8::Context> JsContext<T>::getHandle(Lock& js) {
 #include "function.h"
 #include "iterator.h"
 #include "jsvalue.h"
+// clang-format on

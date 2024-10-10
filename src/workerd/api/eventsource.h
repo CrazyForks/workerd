@@ -3,9 +3,10 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #pragma once
+#include "basics.h"
+
 #include <workerd/jsg/jsg.h>
 #include <workerd/jsg/url.h>
-#include "basics.h"
 
 namespace workerd::api {
 
@@ -163,6 +164,7 @@ public:
   }
 
   JSG_RESOURCE_TYPE(EventSource) {
+    JSG_INHERIT(EventTarget);
     JSG_METHOD(close);
     JSG_READONLY_PROTOTYPE_PROPERTY(url, getUrl);
     JSG_READONLY_PROTOTYPE_PROPERTY(withCredentials, getWithCredentials);

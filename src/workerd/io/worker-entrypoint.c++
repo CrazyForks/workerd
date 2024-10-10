@@ -3,16 +3,18 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "worker-entrypoint.h"
-#include <workerd/io/io-context.h>
-#include <capnp/message.h>
-#include <workerd/jsg/jsg.h>
+
 #include <workerd/api/global-scope.h>
 #include <workerd/api/util.h>
+#include <workerd/io/io-context.h>
+#include <workerd/jsg/jsg.h>
 #include <workerd/util/autogate.h>
 #include <workerd/util/sentry.h>
 #include <workerd/util/thread-scopes.h>
-#include <workerd/util/use-perfetto-categories.h>
 #include <workerd/util/uncaught-exception-source.h>
+#include <workerd/util/use-perfetto-categories.h>
+
+#include <capnp/message.h>
 #include <kj/compat/http.h>
 
 namespace workerd {
@@ -314,15 +316,10 @@ kj::Promise<void> WorkerEntrypoint::request(kj::HttpMethod method,
     // Now that the IoContext is dropped (unless it had waitUntil()s), we can finish proxying
     // without pinning it or the isolate into memory.
     KJ_IF_SOME(p, proxyTask) {
-      if (util::Autogate::isEnabled(util::AutogateKey::RESPONSE_STREAM_DISCONNECTED_STATUS)) {
-        return p.catch_(
-            [metrics = kj::mv(metrics)](kj::Exception&& e) mutable -> kj::Promise<void> {
-          metrics->reportFailure(e, RequestObserver::FailureSource::DEFERRED_PROXY);
-          return kj::mv(e);
-        });
-      } else {
-        return kj::mv(p);
-      }
+      return p.catch_([metrics = kj::mv(metrics)](kj::Exception&& e) mutable -> kj::Promise<void> {
+        metrics->reportFailure(e, RequestObserver::FailureSource::DEFERRED_PROXY);
+        return kj::mv(e);
+      });
     } else {
       return kj::READY_NOW;
     }

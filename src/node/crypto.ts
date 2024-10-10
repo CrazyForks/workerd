@@ -2,16 +2,17 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 //
-/* eslint-disable */
-
 import { ERR_METHOD_NOT_IMPLEMENTED } from 'node-internal:internal_errors';
 
-export const getRandomValues = crypto.getRandomValues;
+export const getRandomValues = crypto.getRandomValues.bind(crypto);
 export const subtle = crypto.subtle;
 export const webcrypto = crypto;
 
-export function timingSafeEqual(a: any, b: any) {
-  return (subtle as any).timingSafeEqual(a, b);
+export function timingSafeEqual(
+  a: NodeJS.ArrayBufferView,
+  b: NodeJS.ArrayBufferView
+): boolean {
+  return (subtle as any).timingSafeEqual(a, b); // eslint-disable-line
 }
 
 import {
@@ -124,14 +125,14 @@ export {
   X509Certificate,
 };
 
-export function getCiphers() {
+export function getCiphers(): string[] {
   // prettier-ignore
   return ["aes-128-cbc", "aes-192-cbc", "aes-256-cbc", "aes-128-ctr", "aes-192-ctr", "aes-256-ctr",
   "aes-128-ecb", "aes-192-ecb", "aes-256-ecb", "aes-128-gcm", "aes-192-gcm", "aes-256-gcm",
   "aes-128-ofb", "aes-192-ofb", "aes-256-ofb", "des-ecb", "des-ede", "des-ede-cbc", "rc2-cbc"];
 }
 
-export function getCurves() {
+export function getCurves(): string[] {
   // Hardcoded list of supported curves. Note that prime256v1 is equivalent to secp256r1, we follow
   // OpenSSL's and bssl's nomenclature here.
 
@@ -139,7 +140,7 @@ export function getCurves() {
   return ['secp224r1', 'prime256v1', 'secp384r1', 'secp521r1'];
 }
 
-export function getHashes() {
+export function getHashes(): string[] {
   // Hardcoded list of hashes supported in boringssl, node's approach looks pretty clunky. This is
   // expected to change infrequently based of bssl's stability-focused approach.
 
@@ -150,7 +151,7 @@ export function getHashes() {
 }
 
 // We do not implement the openssl secure heap.
-export function secureHeapUsed() {
+export function secureHeapUsed(): Record<string, unknown> {
   return {
     total: 0,
     used: 0,
@@ -160,18 +161,18 @@ export function secureHeapUsed() {
 }
 
 // We do not allow users to set the engine used.
-export function setEngine(_1: string, _2?: number) {
+export function setEngine(_1: string, _2?: number): void {
   throw new ERR_METHOD_NOT_IMPLEMENTED('setEngine');
 }
 
 // We do not allow users to modify the FIPS enablement.
-export function setFips(_: boolean) {
+export function setFips(_: boolean): void {
   throw new ERR_METHOD_NOT_IMPLEMENTED('setFips');
 }
 
 // We always run in FIPS mode.
 export const fips = true;
-export function getFips() {
+export function getFips(): boolean {
   return fips;
 }
 
@@ -229,7 +230,7 @@ export default {
   // Fips
   getFips,
   setFips,
-  get fips() {
+  get fips(): boolean {
     return getFips();
   },
   set fips(_: boolean) {
@@ -238,6 +239,8 @@ export default {
   // WebCrypto
   subtle,
   webcrypto,
+  // Spkac
+  Certificate,
   // X509
   X509Certificate,
 };

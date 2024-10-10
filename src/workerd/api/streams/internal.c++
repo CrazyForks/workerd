@@ -3,13 +3,16 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "internal.h"
+
 #include "readable.h"
 #include "writable.h"
-#include <workerd/jsg/jsg.h>
-#include <kj/vector.h>
+
 #include <workerd/api/util.h>
-#include <workerd/util/string-buffer.h>
 #include <workerd/io/features.h>
+#include <workerd/jsg/jsg.h>
+#include <workerd/util/string-buffer.h>
+
+#include <kj/vector.h>
 
 namespace workerd::api {
 
@@ -1590,6 +1593,8 @@ jsg::Promise<void> WritableStreamInternalController::writeLoopAfterFrontOutputLo
           .then(js,
               ioContext.addFunctor(
                   [this, check, maybeAbort, amountToWrite](jsg::Lock& js) -> jsg::Promise<void> {
+        // Under some conditions, the clean up has already happened.
+        if (queue.empty()) return js.resolvedPromise();
         auto& request = check();
         maybeResolvePromise(js, request.promise);
         decreaseCurrentWriteBufferSize(js, amountToWrite);
@@ -1599,6 +1604,8 @@ jsg::Promise<void> WritableStreamInternalController::writeLoopAfterFrontOutputLo
       }),
               ioContext.addFunctor([this, check, maybeAbort, amountToWrite](
                                        jsg::Lock& js, jsg::Value reason) -> jsg::Promise<void> {
+        // Under some conditions, the clean up has already happened.
+        if (queue.empty()) return js.resolvedPromise();
         auto handle = reason.getHandle(js);
         auto& request = check();
         auto& writable = state.get<IoOwn<Writable>>();
@@ -1742,12 +1749,16 @@ jsg::Promise<void> WritableStreamInternalController::writeLoopAfterFrontOutputLo
 
       return ioContext.awaitIo(js, writable->canceler.wrap(writable->sink->end()))
           .then(js, ioContext.addFunctor([this, check](jsg::Lock& js) {
+        // Under some conditions, the clean up has already happened.
+        if (queue.empty()) return;
         auto& request = check();
         maybeResolvePromise(js, request.promise);
         queue.pop_front();
         finishClose(js);
       }),
               ioContext.addFunctor([this, check](jsg::Lock& js, jsg::Value reason) {
+        // Under some conditions, the clean up has already happened.
+        if (queue.empty()) return;
         auto handle = reason.getHandle(js);
         auto& request = check();
         maybeRejectPromise<void>(js, request.promise, handle);
@@ -2472,8 +2483,7 @@ size_t WritableStreamInternalController::jsgGetMemorySelfSize() const {
 }
 void WritableStreamInternalController::jsgGetMemoryInfo(jsg::MemoryTracker& tracker) const {
   KJ_SWITCH_ONEOF(state) {
-    KJ_CASE_ONEOF(closed, StreamStates::Closed) {
-    }
+    KJ_CASE_ONEOF(closed, StreamStates::Closed) {}
     KJ_CASE_ONEOF(errored, StreamStates::Errored) {
       tracker.trackField("error", errored);
     }
@@ -2517,8 +2527,7 @@ size_t ReadableStreamInternalController::jsgGetMemorySelfSize() const {
 
 void ReadableStreamInternalController::jsgGetMemoryInfo(jsg::MemoryTracker& tracker) const {
   KJ_SWITCH_ONEOF(state) {
-    KJ_CASE_ONEOF(closed, StreamStates::Closed) {
-    }
+    KJ_CASE_ONEOF(closed, StreamStates::Closed) {}
     KJ_CASE_ONEOF(error, StreamStates::Errored) {
       tracker.trackField("error", error);
     }
@@ -2531,10 +2540,8 @@ void ReadableStreamInternalController::jsgGetMemoryInfo(jsg::MemoryTracker& trac
     }
   }
   KJ_SWITCH_ONEOF(readState) {
-    KJ_CASE_ONEOF(unlocked, Unlocked) {
-    }
-    KJ_CASE_ONEOF(locked, Locked) {
-    }
+    KJ_CASE_ONEOF(unlocked, Unlocked) {}
+    KJ_CASE_ONEOF(locked, Locked) {}
     KJ_CASE_ONEOF(pipeLocked, PipeLocked) {
       tracker.trackField("pipeLocked", pipeLocked);
     }

@@ -5,10 +5,11 @@
 #pragma once
 
 #include <workerd/io/actor-id.h>
-#include <kj/string.h>
-#include <kj/debug.h>
+#include <workerd/io/io-util.h>
 #include <workerd/io/trace.h>
-#include <workerd/api/util.h>
+
+#include <kj/debug.h>
+#include <kj/string.h>
 
 namespace kj {
 class HttpClient;
@@ -88,7 +89,7 @@ public:
     kj::Maybe<kj::String> cfBlobJson;
 
     // Specifies the parent span for the subrequest for tracing purposes.
-    SpanParent parentSpan = nullptr;
+    TraceParentContext tracing = TraceParentContext(nullptr, nullptr);
 
     // Serialized JSON value to pass in ew_compat field of control header to FL. If this subrequest
     // does not go directly to FL, this value is ignored. Flags marked with `$neededByFl` in
@@ -100,7 +101,7 @@ public:
     kj::Maybe<kj::StringPtr> featureFlagsForFl;
 
     // Timestamp for when a subrequest is started. (ms since the Unix Epoch)
-    double startTime = api::dateNow();
+    double startTime = dateNow();
   };
 
   virtual kj::Own<WorkerInterface> startSubrequest(uint channel, SubrequestMetadata metadata) = 0;
@@ -151,6 +152,7 @@ public:
       const ActorIdFactory::ActorId& id,
       kj::Maybe<kj::String> locationHint,
       ActorGetMode mode,
+      bool enableReplicaRouting,
       SpanParent parentSpan) = 0;
 
   // Get an actor stub from the given namespace for the actor with the given name.

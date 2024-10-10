@@ -4,27 +4,30 @@
 
 #pragma once
 
+#include "io-own.h"
+#include "worker.h"
+
+#include <workerd/api/deferred-proxy.h>
 #include <workerd/io/actor-id.h>
 #include <workerd/io/io-channels.h>
 #include <workerd/io/io-gate.h>
-#include "io-own.h"
-#include "io-timers.h"
-#include "io-thread-context.h"
-#include "limit-enforcer.h"
+#include <workerd/io/io-thread-context.h>
+#include <workerd/io/io-timers.h>
 #include <workerd/io/trace.h>
-#include "worker.h"
-#include <workerd/api/deferred-proxy.h>
 #include <workerd/jsg/async-context.h>
 #include <workerd/jsg/jsg.h>
+#include <workerd/util/uncaught-exception-source.h>
+#include <workerd/util/weak-refs.h>
+
+#include <capnp/dynamic.h>
 #include <kj/async-io.h>
 #include <kj/compat/http.h>
-#include <kj/mutex.h>
 #include <kj/function.h>
-#include <capnp/dynamic.h>
-#include <workerd/util/weak-refs.h>
-#include <workerd/io/limit-enforcer.h>
-#include <workerd/io/io-channels.h>
-#include <workerd/util/uncaught-exception-source.h>
+#include <kj/mutex.h>
+
+namespace workerd {
+class LimitEnforcer;
+}
 
 namespace capnp {
 class HttpOverCapnpFactory;
@@ -308,8 +311,6 @@ public:
   // Log an uncaught exception from an asynchronous context, i.e. when the IoContext is not
   // "current".
   void logUncaughtExceptionAsync(UncaughtExceptionSource source, kj::Exception&& e);
-
-  void reportPromiseRejectEvent(v8::PromiseRejectMessage& message);
 
   // Returns a promise that will reject with an exception if and when the request should be
   // aborted, e.g. because its CPU time expired. This should be joined with any promises for
@@ -659,13 +660,17 @@ public:
   };
 
   kj::Own<WorkerInterface> getSubrequestNoChecks(
-      kj::FunctionParam<kj::Own<WorkerInterface>(SpanBuilder&, IoChannelFactory&)> func,
+      kj::FunctionParam<kj::Own<WorkerInterface>(TraceContext&, IoChannelFactory&)> func,
       SubrequestOptions options);
 
   // If creating a new subrequest is permitted, calls the given factory function synchronously to
   // create one.
+  // If operationName is specified within options and tracing is enabled, this will add a child span
+  // to the current trace span for both tracing formats.
+  // TODO(o11y): In the future we may need to change the interface to support having different span
+  // names and enforce that only documented spans can be emitted.
   kj::Own<WorkerInterface> getSubrequest(
-      kj::FunctionParam<kj::Own<WorkerInterface>(SpanBuilder&, IoChannelFactory&)> func,
+      kj::FunctionParam<kj::Own<WorkerInterface>(TraceContext&, IoChannelFactory&)> func,
       SubrequestOptions options);
 
   // Get WorkerInterface objects to use for subrequests.
@@ -721,9 +726,10 @@ public:
       const ActorIdFactory::ActorId& id,
       kj::Maybe<kj::String> locationHint,
       ActorGetMode mode,
+      bool enableReplicaRouting,
       SpanParent parentSpan) {
     return getIoChannelFactory().getGlobalActor(
-        channel, id, kj::mv(locationHint), mode, kj::mv(parentSpan));
+        channel, id, kj::mv(locationHint), mode, enableReplicaRouting, kj::mv(parentSpan));
   }
   kj::Own<IoChannelFactory::ActorChannel> getColoLocalActorChannel(
       uint channel, kj::StringPtr id, SpanParent parentSpan) {
@@ -745,11 +751,13 @@ public:
   // Returns the current span being recorded.  If called while the JS lock is held, uses the trace
   // information from the current async context, if available.
   SpanParent getCurrentTraceSpan();
+  SpanParent getCurrentLimeTraceSpan();
 
   // Returns a builder for recording tracing spans (or a no-op builder if tracing is inactive).
   // If called while the JS lock is held, uses the trace information from the current async
   // context, if available.
   SpanBuilder makeTraceSpan(kj::ConstString operationName);
+  SpanBuilder makeLimeTraceSpan(kj::ConstString operationName);
 
   // Implement per-IoContext rate limiting for Cache.put(). Pass the body of a Cache API PUT
   // request and get a possibly wrapped stream back.
@@ -858,7 +866,7 @@ private:
   kj::Own<WorkerInterface> getSubrequestChannelImpl(uint channel,
       bool isInHouse,
       kj::Maybe<kj::String> cfBlobJson,
-      SpanBuilder& span,
+      TraceContext& tracing,
       IoChannelFactory& channelFactory);
 
   friend class IoContext_IncomingRequest;
@@ -936,6 +944,9 @@ private:
   void runInContextScope(Worker::LockType lockType,
       kj::Maybe<InputGate::Lock> inputLock,
       kj::Function<void(Worker::Lock&)> func);
+
+  kj::Promise<void> deleteQueueSignalTask;
+  static kj::Promise<void> startDeleteQueueSignalTask(IoContext* context);
 
   friend class Finalizeable;
   friend class DeleteQueue;

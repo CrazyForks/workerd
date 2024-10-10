@@ -3,10 +3,13 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "util.h"
-#include <kj/encoding.h>
-#include <workerd/io/io-context.h>
-#include <workerd/util/thread-scopes.h>
+
+#include "simdutf.h"
+
 #include <workerd/util/mimetype.h>
+#include <workerd/util/strings.h>
+
+#include <kj/encoding.h>
 
 namespace workerd::api {
 
@@ -38,19 +41,61 @@ kj::ArrayPtr<const char> split(kj::ArrayPtr<const char>& text, char c) {
   return result;
 }
 
+constexpr uint64_t broadcast(uint8_t v) noexcept {
+  return 0x101010101010101ull * v;
+}
+
+// SWAR routine designed to convert ASCII uppercase letters to lowercase.
+// Let's process 8 bytes (64 bits) at a time using a single 64-bit int,
+// treating as 8 parallel 8-bit values.
+// PS: This will enable the use of auto-vectorization.
+constexpr void toLowerAscii(char* input, size_t length) noexcept {
+  constexpr const uint64_t broadcast_80 = broadcast(0x80);
+  constexpr const uint64_t broadcast_Ap = broadcast(128 - 'A');
+  constexpr const uint64_t broadcast_Zp = broadcast(128 - 'Z' - 1);
+  size_t i = 0;
+  for (; i + 7 < length; i += 8) {
+    uint64_t word{};
+    memcpy(&word, input + i, sizeof(word));
+    word ^= (((word + broadcast_Ap) ^ (word + broadcast_Zp)) & broadcast_80) >> 2;
+    memcpy(input + i, &word, sizeof(word));
+  }
+  if (i < length) {
+    uint64_t word{};
+    memcpy(&word, input + i, length - i);
+    word ^= (((word + broadcast_Ap) ^ (word + broadcast_Zp)) & broadcast_80) >> 2;
+    memcpy(input + i, &word, length - i);
+  }
+}
+
+constexpr void toUpperAscii(char* input, size_t length) noexcept {
+  constexpr const uint64_t broadcast_80 = broadcast(0x80);
+  constexpr const uint64_t broadcast_ap = broadcast(128 - 'a');
+  constexpr const uint64_t broadcast_zp = broadcast(128 - 'z' - 1);
+  size_t i = 0;
+  for (; i + 7 < length; i += 8) {
+    uint64_t word{};
+    memcpy(&word, input + i, sizeof(word));
+    word ^= (((word + broadcast_ap) ^ (word + broadcast_zp)) & broadcast_80) >> 2;
+    memcpy(input + i, &word, sizeof(word));
+  }
+  if (i < length) {
+    uint64_t word{};
+    memcpy(&word, input + i, length - i);
+    word ^= (((word + broadcast_ap) ^ (word + broadcast_zp)) & broadcast_80) >> 2;
+    memcpy(input + i, &word, length - i);
+  }
+}
+
 }  // namespace
 
 kj::String toLower(kj::String&& str) {
-  for (char& c: str) {
-    if ('A' <= c && c <= 'Z') c += 'a' - 'A';
-  }
+  toLowerAscii(str.begin(), str.size());
   return kj::mv(str);
 }
 
 kj::String toUpper(kj::String&& str) {
-  for (char& c: str) {
-    if ('a' <= c && c <= 'z') c -= 'a' - 'A';
-  }
+  toUpperAscii(str.begin(), str.size());
   return kj::mv(str);
 }
 
@@ -169,28 +214,30 @@ kj::String redactUrl(kj::StringPtr url) {
   };
 
   for (const char& c: url) {
-    bool isUpper = ('A' <= c && c <= 'Z');
-    bool isLower = ('a' <= c && c <= 'z');
-    bool isDigit = ('0' <= c && c <= '9');
-    bool isHexDigit = (isDigit || ('A' <= c && c <= 'F') || ('a' <= c && c <= 'f'));
-    bool isSep = (c == '+' || c == '-' || c == '_');
+    uint8_t lookup = kCharLookupTable[c];
+    bool isSep = lookup & CharAttributeFlag::SEPARATOR;
+    bool isAlphaUpper = lookup & CharAttributeFlag::UPPER_CASE;
+    bool isAlphaLower = lookup & CharAttributeFlag::LOWER_CASE;
+    bool isDigit = lookup & CharAttributeFlag::DIGIT;
+    bool isHex = lookup & CharAttributeFlag::HEX;
+
     // These extra characters are used in the regular and url-safe versions of
     // base64, but might also be used for GUID-style separators in hex ids.
     // Regular base64 also includes '/', which we don't try to match here due
     // to its prevalence in URLs.  Likewise, we ignore the base64 "=" padding
     // character.
 
-    if (isUpper || isLower || isDigit || isSep) {
-      if (isHexDigit) {
+    if (isAlphaUpper || isAlphaLower || isDigit || isSep) {
+      if (isHex) {
         hexDigitCount++;
       }
-      if (!isHexDigit && !isSep) {
+      if (!isHex && !isSep) {
         sawNonHexChar = true;
       }
-      if (isUpper) {
+      if (isAlphaUpper) {
         upperCount++;
       }
-      if (isLower) {
+      if (isAlphaLower) {
         lowerCount++;
       }
       if (isDigit) {
@@ -211,15 +258,6 @@ kj::String redactUrl(kj::StringPtr url) {
   redacted.add('\0');
 
   return kj::String(redacted.releaseAsArray());
-}
-
-double dateNow() {
-  if (IoContext::hasCurrent()) {
-    auto& ioContext = IoContext::current();
-    return (ioContext.now() - kj::UNIX_EPOCH) / kj::MILLISECONDS;
-  }
-
-  return 0.0;
 }
 
 kj::Maybe<jsg::V8Ref<v8::Object>> cloneRequestCf(
@@ -244,4 +282,28 @@ void maybeWarnIfNotText(jsg::Lock& js, kj::StringPtr str) {
           "\". The result will probably be corrupted. Consider "
           "checking the Content-Type header before interpreting entities as text."));
 }
+
+kj::String fastEncodeBase64Url(kj::ArrayPtr<const byte> bytes) {
+  if (KJ_UNLIKELY(bytes.size() == 0)) {
+    return {};
+  }
+  auto expected_length = simdutf::base64_length_from_binary(bytes.size(), simdutf::base64_url);
+  auto output = kj::heapArray<char>(expected_length + 1);
+  auto actual_length = simdutf::binary_to_base64(
+      bytes.asChars().begin(), bytes.size(), output.asChars().begin(), simdutf::base64_url);
+  output[actual_length] = '\0';
+  return kj::String(kj::mv(output));
+}
+
+kj::Array<char16_t> fastEncodeUtf16(kj::ArrayPtr<const char> bytes) {
+  if (KJ_UNLIKELY(bytes.size() == 0)) {
+    return {};
+  }
+  auto expected_length = simdutf::utf16_length_from_utf8(bytes.asChars().begin(), bytes.size());
+  auto output = kj::heapArray<char16_t>(expected_length);
+  auto actual_length =
+      simdutf::convert_utf8_to_utf16(bytes.asChars().begin(), bytes.size(), output.begin());
+  return output.slice(0, actual_length).attach(kj::mv(output));
+}
+
 }  // namespace workerd::api

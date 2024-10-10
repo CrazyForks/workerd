@@ -2,7 +2,7 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
-#include <algorithm>
+#include "test-fixture.h"
 
 #include <workerd/api/actor-state.h>
 #include <workerd/api/global-scope.h>
@@ -12,13 +12,14 @@
 #include <workerd/io/io-channels.h>
 #include <workerd/io/limit-enforcer.h>
 #include <workerd/io/observer.h>
-#include <workerd/jsg/modules.h>
+#include <workerd/jsg/jsg.h>
+#include <workerd/jsg/setup.h>
 #include <workerd/server/server.h>
 #include <workerd/server/workerd-api.h>
 #include <workerd/util/autogate.h>
 #include <workerd/util/stream-utils.h>
 
-#include "test-fixture.h"
+#include <algorithm>
 
 namespace workerd {
 
@@ -98,6 +99,7 @@ struct DummyIoChannelFactory final: public IoChannelFactory {
       const ActorIdFactory::ActorId& id,
       kj::Maybe<kj::String> locationHint,
       ActorGetMode mode,
+      bool enableReplicaRouting,
       SpanParent parentSpan) override {
     KJ_FAIL_REQUIRE("no actor channels");
   }
@@ -319,7 +321,7 @@ TestFixture::TestFixture(SetupParams&& params)
           false),
       isolateLimitEnforcer(kj::heap<MockIsolateLimitEnforcer>()),
       errorReporter(kj::heap<MockErrorReporter>()),
-      memoryCacheProvider(kj::heap<api::MemoryCacheProvider>()),
+      memoryCacheProvider(kj::heap<api::MemoryCacheProvider>(*timer)),
       api(kj::heap<server::WorkerdApi>(testV8System,
           params.featureFlags.orDefault(CompatibilityFlags::Reader()),
           *isolateLimitEnforcer,
@@ -355,14 +357,15 @@ TestFixture::TestFixture(SetupParams&& params)
   KJ_IF_SOME(id, params.actorId) {
     worker->runInLockScope(Worker::Lock::TakeSynchronously(kj::none), [&](Worker::Lock& lock) {
       auto makeActorCache = [](const ActorCache::SharedLru& sharedLru, OutputGate& outputGate,
-                                ActorCache::Hooks& hooks) {
+                                ActorCache::Hooks& hooks, SqliteObserver& sqliteObserver) {
         return kj::heap<ActorCache>(
             kj::heap<server::EmptyReadOnlyActorStorageImpl>(), sharedLru, outputGate, hooks);
       };
       auto makeStorage =
           [](jsg::Lock& js, const Worker::Api& api,
               ActorCacheInterface& actorCache) -> jsg::Ref<api::DurableObjectStorage> {
-        return jsg::alloc<api::DurableObjectStorage>(IoContext::current().addObject(actorCache));
+        return jsg::alloc<api::DurableObjectStorage>(
+            IoContext::current().addObject(actorCache), /*enableSql=*/false);
       };
       actor = kj::refcounted<Worker::Actor>(*worker, /*tracker=*/kj::none, kj::mv(id),
           /*hasTransient=*/false, makeActorCache,

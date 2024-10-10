@@ -2,19 +2,19 @@
 
 import logging
 import os
-import re
-import shutil
+import platform
 import subprocess
+import sys
 from argparse import ArgumentParser, Namespace
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from sys import exit
 from typing import Callable, Optional
 
-CLANG_FORMAT = os.environ.get("CLANG_FORMAT", "clang-format")
-PRETTIER = os.environ.get("PRETTIER", "node_modules/.bin/prettier")
-RUFF = os.environ.get("RUFF", "ruff")
-BUILDIFIER = os.environ.get("BUILDIFIER", "buildifier")
+PRETTIER = os.environ.get(
+    "PRETTIER", "bazel-bin/node_modules/prettier/bin/prettier.cjs"
+)
 
 
 def parse_args() -> Namespace:
@@ -66,25 +66,6 @@ def parse_args() -> Namespace:
     return options
 
 
-def check_clang_format() -> None:
-    try:
-        # Run clang-format with --version to check its version
-        output = subprocess.check_output([CLANG_FORMAT, "--version"], encoding="utf-8")
-        match = re.search(r"version\s*(\d+)\.(\d+)\.(\d+)", output)
-        if not match:
-            logging.error("unable to read clang version")
-            exit(1)
-
-        major, _, _ = match.groups()
-        if int(major) != 18:
-            logging.error("clang-format version must be 18")
-            exit(1)
-    except FileNotFoundError:
-        # Clang-format is not in the PATH
-        logging.exception("clang-format not found in the PATH")
-        exit(1)
-
-
 def filter_files_by_globs(
     files: list[Path], dir_path: Path, globs: tuple[str, ...]
 ) -> list[Path]:
@@ -99,52 +80,93 @@ def matches_any_glob(globs: tuple[str, ...], file: Path) -> bool:
     return any(file.match(glob) for glob in globs)
 
 
-def clang_format(files: list[Path], check: bool = False) -> bool:
-    cmd = [CLANG_FORMAT]
-    if check:
-        cmd += ["--dry-run", "--Werror"]
+def exec_target() -> str:
+    ALIASES = {"aarch64": "arm64", "x86_64": "amd64", "AMD64": "amd64"}
+
+    machine = platform.machine()
+    return f"{sys.platform}-{ALIASES.get(machine, machine)}"
+
+
+def init_external_dir() -> Path:
+    # Create a symlink to the bazel external directory
+    external_dir = Path("external")
+
+    # Fast path to avoid calling into bazel
+    if external_dir.exists():
+        return external_dir
+
+    try:
+        bazel_base = Path(
+            subprocess.run(["bazel", "info", "output_base"], capture_output=True)
+            .stdout.decode()
+            .strip()
+        )
+        external_dir.symlink_to(bazel_base / "external")
+    except FileExistsError:
+        # It's possible the link was created while we were working; this is fine
+        pass
+
+    return external_dir
+
+
+def run_bazel_tool(
+    tool_name: str, args: list[str], is_archive: bool = False
+) -> subprocess.CompletedProcess:
+    tool_target = f"{tool_name}-{exec_target()}"
+
+    if is_archive:
+        tool_path = init_external_dir() / tool_target / tool_name
     else:
-        cmd.append("-i")
-    result = subprocess.run(cmd + files)
+        tool_path = init_external_dir() / tool_target / "file" / "downloaded"
+
+    if not tool_path.exists():
+        fetch_target = (
+            f"@{tool_target}//:file" if is_archive else f"@{tool_target}//file"
+        )
+        subprocess.run(["bazel", "fetch", fetch_target])
+
+    return subprocess.run([tool_path, *args])
+
+
+def clang_format(files: list[Path], check: bool = False) -> bool:
+    if check:
+        cmd = ["--dry-run", "--Werror"]
+    else:
+        cmd = ["-i"]
+    result = run_bazel_tool("clang-format", cmd + files)
     return result.returncode == 0
 
 
 def prettier(files: list[Path], check: bool = False) -> bool:
+    if not Path(PRETTIER).exists():
+        subprocess.run(["bazel", "build", "//:node_modules/prettier"])
+
     cmd = [PRETTIER, "--log-level=warn", "--check" if check else "--write"]
     result = subprocess.run(cmd + files)
     return result.returncode == 0
 
 
 def buildifier(files: list[Path], check: bool = False) -> bool:
-    cmd = [BUILDIFIER, "--mode=check" if check else "--mode=fix"]
-    result = subprocess.run(cmd + files)
+    cmd = ["--mode=check" if check else "--mode=fix"]
+    result = run_bazel_tool("buildifier", cmd + files)
     return result.returncode == 0
 
 
 def ruff(files: list[Path], check: bool = False) -> bool:
     if not files:
         return True
-    if not shutil.which(RUFF):
-        msg = "Cannot find ruff, will not format Python"
-        if check:
-            # In ci, fail.
-            logging.error(msg)
-            return False
-        else:
-            # In a local checkout, let it go. If the user wants Python
-            # formatting they can install ruff and run again.
-            logging.warning(msg)
-            return True
-    # lint
-    cmd = [RUFF, "check"]
+
+    cmd = ["check"]
     if not check:
         cmd.append("--fix")
-    result1 = subprocess.run(cmd + files)
+    result1 = run_bazel_tool("ruff", cmd + files, is_archive=True)
+
     # format
-    cmd = [RUFF, "format"]
+    cmd = ["format"]
     if check:
         cmd.append("--diff")
-    result2 = subprocess.run(cmd + files)
+
+    result2 = run_bazel_tool("ruff", cmd + files, is_archive=True)
     return result1.returncode == 0 and result2.returncode == 0
 
 
@@ -203,18 +225,27 @@ FORMATTERS = [
 ]
 
 
-def format(config: FormatConfig, files: list[Path], check: bool) -> bool:
+def format(config: FormatConfig, files: list[Path], check: bool) -> tuple[bool, str]:
     matching_files = filter_files_by_globs(files, Path(config.directory), config.globs)
 
     if not matching_files:
-        return True
+        return (
+            True,
+            f"No matching files for {config.directory} ({', '.join(config.globs)})",
+        )
 
-    return config.formatter(matching_files, check)
+    result = config.formatter(matching_files, check)
+    message = (
+        f"{len(matching_files)} files in {config.directory} ({', '.join(config.globs)})"
+    )
+    return (
+        result,
+        f"{'Checked' if check else 'Formatted'} {message}",
+    )
 
 
 def main() -> None:
     options = parse_args()
-    check_clang_format()
     if options.subcommand == "git":
         files = git_get_modified_files(options.target, options.source, options.staged)
     else:
@@ -222,8 +253,22 @@ def main() -> None:
 
     all_ok = True
 
-    for config in FORMATTERS:
-        all_ok &= format(config, files, options.check)
+    with ThreadPoolExecutor() as executor:
+        future_to_config = {
+            executor.submit(format, config, files, options.check): config
+            for config in FORMATTERS
+        }
+        for future in as_completed(future_to_config):
+            config = future_to_config[future]
+            try:
+                result, message = future.result()
+                all_ok &= result
+                logging.info(message)
+            except Exception:
+                logging.exception(
+                    f"Formatter for {config.directory} generated an exception"
+                )
+                all_ok = False
 
     if not all_ok:
         logging.error(

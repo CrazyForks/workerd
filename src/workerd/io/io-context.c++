@@ -3,12 +3,16 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "io-context.h"
+
 #include <workerd/io/io-gate.h>
 #include <workerd/io/worker.h>
-#include <kj/debug.h>
 #include <workerd/jsg/jsg.h>
 #include <workerd/util/sentry.h>
 #include <workerd/util/uncaught-exception-source.h>
+
+#include <kj/debug.h>
+
+#include <cmath>
 #include <map>
 
 namespace workerd {
@@ -124,7 +128,8 @@ IoContext::IoContext(ThreadContext& thread,
       deleteQueue(kj::atomicRefcounted<DeleteQueue>()),
       cachePutSerializer(kj::READY_NOW),
       waitUntilTasks(*this),
-      timeoutManager(kj::heap<TimeoutManagerImpl>()) {
+      timeoutManager(kj::heap<TimeoutManagerImpl>()),
+      deleteQueueSignalTask(startDeleteQueueSignalTask(this)) {
   kj::PromiseFulfillerPair<void> paf = kj::newPromiseAndFulfiller<void>();
   abortFulfiller = kj::mv(paf.fulfiller);
   auto localAbortPromise = kj::mv(paf.promise);
@@ -374,10 +379,6 @@ void IoContext::logUncaughtExceptionAsync(
   kj::Maybe<RequestObserver&> metrics;
   if (!incomingRequests.empty()) metrics = getMetrics();
   runImpl(runnable, false, Worker::Lock::TakeSynchronously(metrics), kj::none, true);
-}
-
-void IoContext::reportPromiseRejectEvent(v8::PromiseRejectMessage& message) {
-  KJ_REQUIRE_NONNULL(currentLock).reportPromiseRejectEvent(message);
 }
 
 void IoContext::addTask(kj::Promise<void> promise) {
@@ -783,14 +784,20 @@ kj::Date IoContext::now() {
 }
 
 kj::Own<WorkerInterface> IoContext::getSubrequestNoChecks(
-    kj::FunctionParam<kj::Own<WorkerInterface>(SpanBuilder&, IoChannelFactory&)> func,
+    kj::FunctionParam<kj::Own<WorkerInterface>(TraceContext&, IoChannelFactory&)> func,
     SubrequestOptions options) {
   SpanBuilder span = nullptr;
+  SpanBuilder limeSpan = nullptr;
+
   KJ_IF_SOME(n, options.operationName) {
-    span = makeTraceSpan(kj::mv(n));
+    // TODO(cleanup): Using kj::Maybe<kj::LiteralStringConst> for operationName instead would remove
+    // a memory allocation here, but there might be use cases for dynamically allocated strings.
+    span = makeTraceSpan(kj::ConstString(kj::str(n)));
+    limeSpan = makeLimeTraceSpan(kj::ConstString(kj::mv(n)));
   }
 
-  auto ret = func(span, getIoChannelFactory());
+  TraceContext tracing(kj::mv(span), kj::mv(limeSpan));
+  auto ret = func(tracing, getIoChannelFactory());
 
   if (options.wrapMetrics) {
     auto& metrics = getMetrics();
@@ -799,15 +806,18 @@ kj::Own<WorkerInterface> IoContext::getSubrequestNoChecks(
         kj::mv(ret), getHeaderIds().contentEncoding, metrics);
   }
 
-  if (span.isObserved()) {
-    ret = ret.attach(kj::mv(span));
+  if (tracing.span.isObserved()) {
+    ret = ret.attach(kj::mv(tracing.span));
+  }
+  if (tracing.limeSpan.isObserved()) {
+    ret = ret.attach(kj::mv(tracing.limeSpan));
   }
 
   return kj::mv(ret);
 }
 
 kj::Own<WorkerInterface> IoContext::getSubrequest(
-    kj::FunctionParam<kj::Own<WorkerInterface>(SpanBuilder&, IoChannelFactory&)> func,
+    kj::FunctionParam<kj::Own<WorkerInterface>(TraceContext&, IoChannelFactory&)> func,
     SubrequestOptions options) {
   limitEnforcer->newSubrequest(options.inHouse);
   return getSubrequestNoChecks(kj::mv(func), kj::mv(options));
@@ -816,8 +826,9 @@ kj::Own<WorkerInterface> IoContext::getSubrequest(
 kj::Own<WorkerInterface> IoContext::getSubrequestChannel(
     uint channel, bool isInHouse, kj::Maybe<kj::String> cfBlobJson, kj::ConstString operationName) {
   return getSubrequest(
-      [&](SpanBuilder& span, IoChannelFactory& channelFactory) {
-    return getSubrequestChannelImpl(channel, isInHouse, kj::mv(cfBlobJson), span, channelFactory);
+      [&](TraceContext& tracing, IoChannelFactory& channelFactory) {
+    return getSubrequestChannelImpl(
+        channel, isInHouse, kj::mv(cfBlobJson), tracing, channelFactory);
   },
       SubrequestOptions{
         .inHouse = isInHouse,
@@ -831,8 +842,9 @@ kj::Own<WorkerInterface> IoContext::getSubrequestChannelNoChecks(uint channel,
     kj::Maybe<kj::String> cfBlobJson,
     kj::Maybe<kj::ConstString> operationName) {
   return getSubrequestNoChecks(
-      [&](SpanBuilder& span, IoChannelFactory& channelFactory) {
-    return getSubrequestChannelImpl(channel, isInHouse, kj::mv(cfBlobJson), span, channelFactory);
+      [&](TraceContext& tracing, IoChannelFactory& channelFactory) {
+    return getSubrequestChannelImpl(
+        channel, isInHouse, kj::mv(cfBlobJson), tracing, channelFactory);
   },
       SubrequestOptions{
         .inHouse = isInHouse,
@@ -844,11 +856,11 @@ kj::Own<WorkerInterface> IoContext::getSubrequestChannelNoChecks(uint channel,
 kj::Own<WorkerInterface> IoContext::getSubrequestChannelImpl(uint channel,
     bool isInHouse,
     kj::Maybe<kj::String> cfBlobJson,
-    SpanBuilder& span,
+    TraceContext& tracing,
     IoChannelFactory& channelFactory) {
   IoChannelFactory::SubrequestMetadata metadata{
     .cfBlobJson = kj::mv(cfBlobJson),
-    .parentSpan = span,
+    .tracing = tracing,
     .featureFlagsForFl = worker->getIsolate().getFeatureFlagsForFl(),
   };
 
@@ -913,8 +925,18 @@ SpanParent IoContext::getCurrentTraceSpan() {
   return getMetrics().getSpan();
 }
 
+SpanParent IoContext::getCurrentLimeTraceSpan() {
+  // TODO(o11y): Add support for retrieving span from storage scope lock for more accurate span
+  // context, as with Jaeger spans.
+  return getMetrics().getLimeSpan();
+}
+
 SpanBuilder IoContext::makeTraceSpan(kj::ConstString operationName) {
   return getCurrentTraceSpan().newChild(kj::mv(operationName));
+}
+
+SpanBuilder IoContext::makeLimeTraceSpan(kj::ConstString operationName) {
+  return getCurrentLimeTraceSpan().newChild(kj::mv(operationName));
 }
 
 void IoContext::taskFailed(kj::Exception&& exception) {
@@ -1285,9 +1307,35 @@ void IoContext::throwNotCurrentJsError(kj::Maybe<const std::type_info&> maybeTyp
 
 jsg::JsObject IoContext::getPromiseContextTag(jsg::Lock& js) {
   if (promiseContextTag == kj::none) {
-    promiseContextTag = jsg::JsRef(js, js.obj());
+    auto deferral = kj::heap<IoCrossContextExecutor>(kj::atomicAddRef(*deleteQueue));
+    promiseContextTag = jsg::JsRef(js, js.opaque(kj::mv(deferral)));
   }
   return KJ_REQUIRE_NONNULL(promiseContextTag).getHandle(js);
+}
+
+kj::Promise<void> IoContext::startDeleteQueueSignalTask(IoContext* context) {
+  // The promise that is returned is held by the IoContext itself, so when the
+  // IoContext is destroyed, the promise will be canceled and the loop will
+  // end. On each iteration of the loop we want to reset the cross thread
+  // signal in the delete queue, then wait on the promise. Once the promise
+  // is fulfilled, we will run an empty task to prompt the IoContext to drain
+  // the DeleteQueue.
+  try {
+    for (;;) {
+      co_await context->deleteQueue->resetCrossThreadSignal();
+      co_await context->run([](auto& lock) {
+        auto& context = IoContext::current();
+        auto l = context.deleteQueue->crossThreadDeleteQueue.lockExclusive();
+        auto& state = KJ_ASSERT_NONNULL(*l);
+        for (auto& action: state.actions) {
+          action(lock);
+        }
+        state.actions.clear();
+      });
+    }
+  } catch (...) {
+    context->abort(kj::getCaughtExceptionAsKj());
+  }
 }
 
 // ======================================================================================

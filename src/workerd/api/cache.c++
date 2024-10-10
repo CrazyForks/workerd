@@ -3,9 +3,12 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "cache.h"
+
 #include "util.h"
-#include <kj/encoding.h>
+
 #include <workerd/io/io-context.h>
+
+#include <kj/encoding.h>
 
 namespace workerd::api {
 
@@ -514,8 +517,9 @@ jsg::Promise<bool> Cache::delete_(
 }
 
 kj::Own<kj::HttpClient> Cache::getHttpClient(
-    IoContext& context, kj::Maybe<kj::String> cfBlobJson, kj::ConstString operationName) {
-  auto span = context.makeTraceSpan(kj::mv(operationName));
+    IoContext& context, kj::Maybe<kj::String> cfBlobJson, kj::LiteralStringConst operationName) {
+  auto span = context.makeTraceSpan(operationName);
+  auto limeSpan = context.makeLimeTraceSpan(operationName);
 
   auto cacheClient = context.getCacheClient();
   auto httpClient = cacheName

@@ -8,10 +8,14 @@
 // Don't include this file unless your name is "crypto*.c++".
 
 #include "crypto.h"
+
 #include <workerd/api/util.h>
+
+#include <openssl/base.h>
+#include <openssl/bn.h>
+#include <openssl/err.h>
+
 #include <kj/encoding.h>
-#include <openssl/evp.h>
-#include <openssl/bio.h>
 
 typedef struct bignum_st BIGNUM;
 
@@ -424,4 +428,5 @@ KJ_DECLARE_NON_POLYMORPHIC(EC_GROUP);
 KJ_DECLARE_NON_POLYMORPHIC(BN_CTX);
 KJ_DECLARE_NON_POLYMORPHIC(EVP_PKEY);
 KJ_DECLARE_NON_POLYMORPHIC(EVP_PKEY_CTX);
+KJ_DECLARE_NON_POLYMORPHIC(RSA);
 // Tell KJ that these OpenSSL types are non-polymorphic so that they can be wrapped in kj::Own.

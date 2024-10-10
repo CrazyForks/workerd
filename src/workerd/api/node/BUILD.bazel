@@ -4,20 +4,59 @@ load("//:build/wd_test.bzl", "wd_test")
 
 wd_cc_library(
     name = "node",
-    srcs = glob(
-        ["**/*.c++"],
-        exclude = ["**/*-test.c++"],
-    ),
-    hdrs = glob(["**/*.h"]),
+    srcs = [
+        "crypto.c++",
+        "crypto-keys.c++",
+        "diagnostics-channel.c++",
+        "zlib-util.c++",
+    ],
+    hdrs = [
+        "crypto.h",
+        "diagnostics-channel.h",
+        "node.h",
+        "zlib-util.h",
+    ],
     implementation_deps = [
+        "//src/workerd/io",
         "@capnp-cpp//src/kj/compat:kj-gzip",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":node-core",
+        "@capnp-cpp//src/kj/compat:kj-brotli",
+    ],
+)
+
+# node source files that don't depend on io.
+wd_cc_library(
+    name = "node-core",
+    srcs = [
+        "async-hooks.c++",
+        "buffer.c++",
+        "i18n.c++",
+        "module.c++",
+        "url.c++",
+        "util.c++",
+    ],
+    hdrs = [
+        "async-hooks.h",
+        "buffer.h",
+        "buffer-string-search.h",
+        "i18n.h",
+        "module.h",
+        "url.h",
+        "util.h",
+    ],
+    implementation_deps = [
+        "@ada-url",
         "@nbytes",
         "@simdutf",
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//src/workerd/io",
-        "@capnp-cpp//src/kj/compat:kj-brotli",
+        "//src/workerd/io:compatibility-date_capnp",
+        "//src/workerd/jsg",
+        "//src/workerd/util:mimetype",
     ],
 )
 
@@ -83,6 +122,7 @@ wd_test(
 )
 
 wd_test(
+    size = "large",
     src = "tests/crypto_scrypt-test.wd-test",
     args = ["--experimental"],
     data = ["tests/crypto_scrypt-test.js"],
@@ -138,13 +178,32 @@ wd_test(
 )
 
 wd_test(
+    src = "tests/url-nodejs-test.wd-test",
+    args = ["--experimental"],
+    data = ["tests/url-nodejs-test.js"],
+)
+
+wd_test(
     src = "tests/util-nodejs-test.wd-test",
     args = ["--experimental"],
     data = ["tests/util-nodejs-test.js"],
 )
 
 wd_test(
+    src = "tests/sys-nodejs-test.wd-test",
+    args = ["--experimental"],
+    data = ["tests/sys-nodejs-test.js"],
+)
+
+wd_test(
+    size = "large",
     src = "tests/zlib-nodejs-test.wd-test",
     args = ["--experimental"],
     data = ["tests/zlib-nodejs-test.js"],
+)
+
+wd_test(
+    src = "tests/module-create-require-test.wd-test",
+    args = ["--experimental"],
+    data = ["tests/module-create-require-test.js"],
 )

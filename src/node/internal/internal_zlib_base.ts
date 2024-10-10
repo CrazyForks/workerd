@@ -3,7 +3,11 @@
 //     https://opensource.org/licenses/Apache-2.0
 // Copyright Joyent and Node contributors. All rights reserved. MIT license.
 
-import { default as zlibUtil, type ZlibOptions } from 'node-internal:zlib';
+import {
+  default as zlibUtil,
+  type ZlibOptions,
+  type BrotliOptions,
+} from 'node-internal:zlib';
 import { Buffer, kMaxLength } from 'node-internal:internal_buffer';
 import {
   checkRangesOrGetDefault,
@@ -13,6 +17,8 @@ import {
   ERR_OUT_OF_RANGE,
   ERR_BUFFER_TOO_LARGE,
   ERR_INVALID_ARG_TYPE,
+  ERR_BROTLI_INVALID_PARAM,
+  ERR_ZLIB_INITIALIZATION_FAILED,
   NodeError,
 } from 'node-internal:internal_errors';
 import { Transform, type DuplexOptions } from 'node-internal:streams_transform';
@@ -21,6 +27,7 @@ import {
   isArrayBufferView,
   isAnyArrayBuffer,
 } from 'node-internal:internal_types';
+import { constants } from 'node-internal:internal_zlib_constants';
 
 // Explicitly import `ok()` to avoid typescript error requiring every name in the call target to
 // be annotated with an explicit type annotation.
@@ -53,8 +60,15 @@ const {
   CONST_BROTLI_DECODE,
   CONST_BROTLI_OPERATION_PROCESS,
   CONST_BROTLI_OPERATION_EMIT_METADATA,
+  CONST_BROTLI_OPERATION_FINISH,
+  CONST_BROTLI_OPERATION_FLUSH,
 } = zlibUtil;
 
+// This type contains all possible handler types.
+type ZlibHandleType =
+  | zlibUtil.ZlibStream
+  | zlibUtil.BrotliEncoder
+  | zlibUtil.BrotliDecoder;
 export const owner_symbol = Symbol('owner');
 
 const FLUSH_BOUND_IDX_NORMAL: number = 0;
@@ -67,7 +81,7 @@ const FLUSH_BOUND: [[number, number], [number, number]] = [
 const kFlushFlag = Symbol('kFlushFlag');
 const kError = Symbol('kError');
 
-function processCallback(this: zlibUtil.ZlibStream): void {
+function processCallback(this: ZlibHandleType): void {
   // This callback's context (`this`) is the `_handle` (ZCtx) object. It is
   // important to null out the values once they are no longer needed since
   // `_handle` can stay in memory long after the buffer is needed.
@@ -83,7 +97,8 @@ function processCallback(this: zlibUtil.ZlibStream): void {
     return;
   }
 
-  const [availOutAfter, availInAfter] = state as unknown as [number, number];
+  const availOutAfter = state[0] as number;
+  const availInAfter = state[1] as number;
 
   const inDelta = handle.availInBefore - availInAfter;
   self.bytesWritten += inDelta;
@@ -98,6 +113,7 @@ function processCallback(this: zlibUtil.ZlibStream): void {
     assert.strictEqual(have, 0, 'have should not go down');
   }
 
+  /* eslint-disable-next-line @typescript-eslint/no-unnecessary-condition */
   if (self.destroyed) {
     this.cb();
     return;
@@ -119,9 +135,10 @@ function processCallback(this: zlibUtil.ZlibStream): void {
     handle.availInBefore = availInAfter;
 
     if (!streamBufferIsFull) {
+      ok(this.buffer, 'Buffer should not have been null');
       this.write(
         handle.flushFlag,
-        this.buffer as NodeJS.TypedArray, // in
+        this.buffer, // in
         handle.inOff, // in_off
         handle.availInBefore, // in_len
         self._outBuffer, // out
@@ -132,16 +149,17 @@ function processCallback(this: zlibUtil.ZlibStream): void {
       // eslint-disable-next-line @typescript-eslint/unbound-method
       const oldRead = self._read;
       self._read = (n): void => {
+        ok(this.buffer, 'Buffer should not have been null');
         self._read = oldRead;
         this.write(
           handle.flushFlag,
-          this.buffer as NodeJS.TypedArray, // in
+          this.buffer, // in
           handle.inOff, // in_off
           handle.availInBefore, // in_len
           self._outBuffer, // out
           self._outOffset, // out_off
-          self._chunkSize
-        ); // out_len
+          self._chunkSize // out_len
+        );
         self._read(n);
       };
     }
@@ -171,7 +189,7 @@ function processCallback(this: zlibUtil.ZlibStream): void {
 // Z_NO_FLUSH (< Z_TREES) < Z_BLOCK < Z_PARTIAL_FLUSH <
 //     Z_SYNC_FLUSH < Z_FULL_FLUSH < Z_FINISH
 const flushiness: number[] = [];
-const kFlushFlagList = [
+const kFlushFlagList: number[] = [
   CONST_Z_NO_FLUSH,
   CONST_Z_BLOCK,
   CONST_Z_PARTIAL_FLUSH,
@@ -183,23 +201,27 @@ for (let i = 0; i < kFlushFlagList.length; i++) {
   flushiness[kFlushFlagList[i] as number] = i;
 }
 
-type BufferWithFlushFlag = Buffer & { [kFlushFlag]: number };
+function maxFlush(a: number, b: number): number {
+  return (flushiness[a] as number) > (flushiness[b] as number) ? a : b;
+}
 
 // Set up a list of 'special' buffers that can be written using .write()
 // from the .flush() code as a way of introducing flushing operations into the
 // write sequence.
-const kFlushBuffers: BufferWithFlushFlag[] = [];
+const kFlushBuffers: (Buffer & { [kFlushFlag]: number })[] = [];
 {
   const dummyArrayBuffer = new ArrayBuffer(0);
   for (const flushFlag of kFlushFlagList) {
-    const buf = Buffer.from(dummyArrayBuffer) as BufferWithFlushFlag;
+    const buf = Buffer.from(dummyArrayBuffer) as Buffer & {
+      [kFlushFlag]: number;
+    };
     buf[kFlushFlag] = flushFlag;
     kFlushBuffers[flushFlag] = buf;
   }
 }
 
 function zlibOnError(
-  this: zlibUtil.ZlibStream,
+  this: ZlibHandleType,
   errno: number,
   code: string,
   message: string
@@ -233,22 +255,23 @@ function processChunkSync(
   let offset = self._outOffset;
   const chunkSize = self._chunkSize;
 
-  let error;
+  let error: Error | undefined;
   self.on('error', function onError(er) {
     error = er;
   });
 
+  /* eslint-disable-next-line @typescript-eslint/no-unnecessary-condition */
   while (true) {
-    // TODO(soon): This was `writeSync` before, but it's not anymore.
-    handle?.write(
+    ok(handle, 'Handle should have been defined');
+    handle.writeSync(
       flushFlag,
       chunk, // in
       inOff, // in_off
       availInBefore, // in_len
       buffer, // out
       offset, // out_off
-      availOutBefore
-    ); // out_len
+      availOutBefore // out_len
+    );
     if (error) throw error;
     else if (self[kError]) throw self[kError];
 
@@ -328,8 +351,8 @@ export class ZlibBase extends Transform {
   public _defaultFlushFlag: number;
   public _finishFlushFlag: number;
   public _defaultFullFlushFlag: number;
-  public _info: unknown;
-  public _handle: zlibUtil.ZlibStream | null = null;
+  public _info: boolean;
+  public _handle: ZlibHandleType | null = null;
   public _writeState = new Uint32Array(2);
 
   public [kError]: NodeError | undefined;
@@ -337,7 +360,7 @@ export class ZlibBase extends Transform {
   public constructor(
     opts: ZlibOptions & DuplexOptions,
     mode: number,
-    handle: zlibUtil.ZlibStream,
+    handle: ZlibHandleType,
     { flush, finishFlush, fullFlush }: ZlibDefaultOptions = zlibDefaultOptions
   ) {
     let chunkSize = CONST_Z_DEFAULT_CHUNK;
@@ -350,6 +373,7 @@ export class ZlibBase extends Transform {
       flushBoundIdx = FLUSH_BOUND_IDX_BROTLI;
     }
 
+    /* eslint-disable-next-line @typescript-eslint/no-unnecessary-condition */
     if (opts) {
       if (opts.chunkSize != null) {
         chunkSize = opts.chunkSize;
@@ -409,7 +433,7 @@ export class ZlibBase extends Transform {
     this._defaultFlushFlag = flush;
     this._finishFlushFlag = finishFlush;
     this._defaultFullFlushFlag = fullFlush;
-    this._info = opts && opts.info;
+    this._info = Boolean(opts.info);
     this._maxOutputLength = maxOutputLength;
   }
 
@@ -449,20 +473,18 @@ export class ZlibBase extends Transform {
     kind?: number | (() => void),
     callback: (() => void) | undefined = undefined
   ): void {
-    if (typeof kind === 'function' || (kind == null && !callback)) {
+    if (typeof kind === 'function' || (kind === undefined && !callback)) {
       callback = kind as (() => void) | undefined;
-      kind = this._defaultFlushFlag;
+      kind = this._defaultFullFlushFlag;
     }
 
     if (this.writableFinished) {
       if (callback) {
-        /* eslint-disable-next-line @typescript-eslint/no-unsafe-call */
         queueMicrotask(callback);
       }
     } else if (this.writableEnded) {
       if (callback) {
-        /* eslint-disable-next-line @typescript-eslint/no-unsafe-call */
-        queueMicrotask(callback);
+        this.once('end', callback);
       }
     } else {
       this.write(kFlushBuffers[kind as number], 'utf8', callback);
@@ -507,6 +529,16 @@ export class ZlibBase extends Transform {
   public _processChunk(
     chunk: Buffer,
     flushFlag: number,
+    cb?: undefined
+  ): Buffer;
+  public _processChunk(
+    chunk: Buffer,
+    flushFlag: number,
+    cb: () => void
+  ): undefined;
+  public _processChunk(
+    chunk: Buffer,
+    flushFlag: number,
     cb?: () => void
   ): Buffer | Uint8Array | undefined {
     if (cb != null && typeof cb === 'function') {
@@ -517,16 +549,16 @@ export class ZlibBase extends Transform {
   }
 
   #processChunk(chunk: Buffer, flushFlag: number, cb: () => void): void {
-    if (this._handle == null) {
-      /* eslint-disable-next-line @typescript-eslint/no-unsafe-call */
+    if (!this._handle) {
       queueMicrotask(cb);
       return;
     }
 
-    this._handle.buffer = null;
+    this._handle.buffer = chunk;
     this._handle.cb = cb;
     this._handle.availOutBefore = this._chunkSize - this._outOffset;
     this._handle.availInBefore = chunk.byteLength;
+    this._handle.inOff = 0;
     this._handle.flushFlag = flushFlag;
 
     this._handle.write(
@@ -539,10 +571,6 @@ export class ZlibBase extends Transform {
       this._handle.availOutBefore // out_len
     );
   }
-}
-
-function maxFlush(a: number, b: number): number {
-  return (flushiness[a] as number) > (flushiness[b] as number) ? a : b;
 }
 
 export class Zlib extends ZlibBase {
@@ -603,7 +631,7 @@ export class Zlib extends ZlibBase {
       );
       dictionary = options.dictionary;
 
-      if (dictionary != null && !isArrayBufferView(dictionary)) {
+      if (dictionary !== undefined && !isArrayBufferView(dictionary)) {
         if (isAnyArrayBuffer(dictionary)) {
           dictionary = Buffer.from(dictionary);
         } else {
@@ -618,24 +646,27 @@ export class Zlib extends ZlibBase {
 
     const writeState = new Uint32Array(2);
     const handle = new zlibUtil.ZlibStream(mode);
+
     handle.initialize(
       windowBits,
       level,
       memLevel,
       strategy,
       writeState,
-      processCallback,
+
+      () => {
+        queueMicrotask(processCallback.bind(handle));
+      },
       dictionary
     );
     super(options ?? {}, mode, handle);
-    handle[owner_symbol] = this;
     this._level = level;
     this._strategy = strategy;
     this._handle = handle;
     this._writeState = writeState;
   }
 
-  public params(level: number, strategy: number, callback: () => never): void {
+  public params(level: number, strategy: number, callback: () => void): void {
     checkRangesOrGetDefault(
       level,
       'level',
@@ -655,7 +686,6 @@ export class Zlib extends ZlibBase {
         this.#paramsAfterFlushCallback.bind(this, level, strategy, callback)
       );
     } else {
-      /* eslint-disable-next-line @typescript-eslint/no-unsafe-call */
       queueMicrotask(callback);
     }
   }
@@ -667,7 +697,7 @@ export class Zlib extends ZlibBase {
   #paramsAfterFlushCallback(
     level: number,
     strategy: number,
-    callback: () => void
+    callback?: () => void
   ): void {
     ok(this._handle, 'zlib binding closed');
     this._handle.params(level, strategy);
@@ -676,5 +706,72 @@ export class Zlib extends ZlibBase {
       this._strategy = strategy;
       callback?.();
     }
+  }
+}
+
+const kMaxBrotliParam = Math.max(
+  ...Object.entries(constants).map(([key, value]) =>
+    key.startsWith('BROTLI_PARAM_') ? value : 0
+  )
+);
+const brotliInitParamsArray = new Uint32Array(kMaxBrotliParam + 1);
+const brotliDefaultOptions: ZlibDefaultOptions = {
+  flush: CONST_BROTLI_OPERATION_PROCESS,
+  finishFlush: CONST_BROTLI_OPERATION_FINISH,
+  fullFlush: CONST_BROTLI_OPERATION_FLUSH,
+};
+
+export class Brotli extends ZlibBase {
+  public constructor(options: BrotliOptions | undefined | null, mode: number) {
+    ok(mode === CONST_BROTLI_DECODE || mode === CONST_BROTLI_ENCODE);
+    brotliInitParamsArray.fill(-1);
+
+    if (options?.params) {
+      for (const [origKey, value] of Object.entries(options.params)) {
+        const key = +origKey;
+        if (
+          Number.isNaN(key) ||
+          key < 0 ||
+          key > kMaxBrotliParam ||
+          ((brotliInitParamsArray[key] as number) | 0) !== -1
+        ) {
+          throw new ERR_BROTLI_INVALID_PARAM(origKey);
+        }
+
+        if (typeof value !== 'number' && typeof value !== 'boolean') {
+          throw new ERR_INVALID_ARG_TYPE(
+            'options.params[key]',
+            'number',
+            value
+          );
+        }
+        // as number is required to avoid force type coercion on runtime.
+        // boolean has number representation, but typescript doesn't understand it.
+        brotliInitParamsArray[key] = value as number;
+      }
+    }
+
+    const handle =
+      mode === CONST_BROTLI_DECODE
+        ? new zlibUtil.BrotliDecoder(mode)
+        : new zlibUtil.BrotliEncoder(mode);
+
+    const _writeState = new Uint32Array(2);
+
+    // TODO(addaleax): Sometimes we generate better error codes in C++ land,
+    // e.g. ERR_BROTLI_PARAM_SET_FAILED -- it's hard to access them with
+    // the current bindings setup, though.
+    if (
+      !handle.initialize(
+        brotliInitParamsArray,
+        _writeState,
+        processCallback.bind(handle)
+      )
+    ) {
+      throw new ERR_ZLIB_INITIALIZATION_FAILED();
+    }
+
+    super(options ?? {}, mode, handle, brotliDefaultOptions);
+    this._writeState = _writeState;
   }
 }

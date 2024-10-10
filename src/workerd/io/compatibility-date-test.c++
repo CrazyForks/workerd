@@ -3,10 +3,11 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "compatibility-date.h"
-#include <kj/debug.h>
-#include <kj/test.h>
+
 #include <capnp/message.h>
 #include <capnp/serialize-text.h>
+#include <kj/debug.h>
+#include <kj/test.h>
 
 namespace workerd {
 namespace {
@@ -178,8 +179,8 @@ KJ_TEST("compatibility flag parsing") {
   expectCompileCompatibilityFlags("2021-05-17", {"r2_internal_beta_bindings"}, "()", {},
       CompatibilityDateValidation::FUTURE_FOR_TEST, true, false);
 
-  // nodejs_compat implies nodejs_compat_v2 on or after 2024-08-05
-  expectCompileCompatibilityFlags("2024-09-02", {"nodejs_compat"},
+  // nodejs_compat implies nodejs_compat_v2 on or after 2024-09-23
+  expectCompileCompatibilityFlags("2024-09-23", {"nodejs_compat"},
       "(formDataParserSupportsFiles = true,"
       " fetchRefusesUnknownProtocols = true,"
       " esiIncludeIsVoidTag = false,"
@@ -234,9 +235,10 @@ KJ_TEST("compatibility flag parsing") {
       " globalFetchStrictlyPublic = false,"
       " newModuleRegistry = false,"
       " allowCustomPorts = true,"
-      " internalWritableStreamAbortClearsQueue = true)",
+      " internalWritableStreamAbortClearsQueue = true,"
+      " nodeJsZlib = true)",
       {}, CompatibilityDateValidation::FUTURE_FOR_TEST, false, false);
-  expectCompileCompatibilityFlags("2024-09-01", {"nodejs_compat"},
+  expectCompileCompatibilityFlags("2024-09-22", {"nodejs_compat"},
       "(formDataParserSupportsFiles = true,"
       " fetchRefusesUnknownProtocols = true,"
       " esiIncludeIsVoidTag = false,"
@@ -289,7 +291,14 @@ KJ_TEST("compatibility flag parsing") {
       " fetchStandardUrl = true,"
       " nodeJsCompatV2 = false,"
       " globalFetchStrictlyPublic = false,"
-      " newModuleRegistry = false)",
+      " newModuleRegistry = false,"
+      " cacheOptionEnabled = false,"
+      " kvDirectBinding = false,"
+      " allowCustomPorts = true,"
+      " increaseWebsocketMessageSize = false,"
+      " internalWritableStreamAbortClearsQueue = true,"
+      " pythonWorkersDevPyodide = false,"
+      " nodeJsZlib = false)",
       {}, CompatibilityDateValidation::FUTURE_FOR_TEST, false, false);
 }
 

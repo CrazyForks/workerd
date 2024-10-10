@@ -6,13 +6,15 @@
 // Defines abstract interfaces for observing the activity of various components of the system,
 // e.g. to collect logs and metrics.
 
-#include <kj/string.h>
-#include <kj/refcount.h>
-#include <kj/exception.h>
-#include <kj/time.h>
-#include <workerd/io/trace.h>
 #include <workerd/io/features.capnp.h>
+#include <workerd/io/trace.h>
 #include <workerd/jsg/observer.h>
+#include <workerd/util/sqlite.h>
+
+#include <kj/exception.h>
+#include <kj/refcount.h>
+#include <kj/string.h>
+#include <kj/time.h>
 
 namespace workerd {
 
@@ -95,6 +97,9 @@ public:
   virtual void setHasDispatched() {};
 
   virtual SpanParent getSpan() {
+    return nullptr;
+  }
+  virtual SpanParent getLimeSpan() {
     return nullptr;
   }
 
@@ -237,7 +242,7 @@ public:
   virtual void teardownFinished() {}
 };
 
-class ActorObserver: public kj::Refcounted {
+class ActorObserver: public kj::Refcounted, public SqliteObserver {
 public:
   // Allows the observer to run in the background, periodically making observations. Owner must
   // call this and store the promise. `limitEnforcer` is used to collect CPU usage metrics, it

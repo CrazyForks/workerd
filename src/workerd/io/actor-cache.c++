@@ -3,14 +3,16 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "actor-cache.h"
-#include <algorithm>
+
+#include <workerd/io/actor-storage.h>
+#include <workerd/io/io-gate.h>
+#include <workerd/jsg/exception.h>
+#include <workerd/util/duration-exceeded-logger.h>
+#include <workerd/util/sentry.h>
 
 #include <kj/debug.h>
 
-#include <workerd/jsg/exception.h>
-#include <workerd/io/io-gate.h>
-#include <workerd/util/sentry.h>
-#include <workerd/util/duration-exceeded-logger.h>
+#include <algorithm>
 
 namespace workerd {
 
@@ -161,7 +163,8 @@ kj::Maybe<kj::Promise<void>> ActorCache::evictStale(kj::Date now) {
   return getBackpressure();
 }
 
-kj::Maybe<kj::Own<void>> ActorCache::armAlarmHandler(kj::Date scheduledTime, bool noCache) {
+kj::OneOf<ActorCache::CancelAlarmHandler, ActorCache::RunAlarmHandler> ActorCache::armAlarmHandler(
+    kj::Date scheduledTime, bool noCache) {
   noCache = noCache || lru.options.noCache;
 
   KJ_ASSERT(!currentAlarmTime.is<DeferredAlarmDelete>());
@@ -171,7 +174,7 @@ kj::Maybe<kj::Own<void>> ActorCache::armAlarmHandler(kj::Date scheduledTime, boo
       if (t.status == KnownAlarmTime::Status::CLEAN) {
         // If there's a clean scheduledTime that is different from ours, this run should be
         // canceled.
-        return kj::none;
+        return CancelAlarmHandler{.waitBeforeCancel = kj::READY_NOW};
       } else {
         // There's a alarm write that hasn't been set yet pending for a time different than ours --
         // We won't cancel the alarm because it hasn't been confirmed, but we shouldn't delete
@@ -189,7 +192,7 @@ kj::Maybe<kj::Own<void>> ActorCache::armAlarmHandler(kj::Date scheduledTime, boo
     };
   }
   static const DeferredAlarmDeleter disposer;
-  return kj::Own<void>(this, disposer);
+  return RunAlarmHandler{.deferredDelete = kj::Own<void>(this, disposer)};
 }
 
 void ActorCache::cancelDeferredAlarmDeletion() {
@@ -398,6 +401,8 @@ void ActorCache::verifyConsistencyForTest() {
 
 kj::OneOf<kj::Maybe<ActorCache::Value>, kj::Promise<kj::Maybe<ActorCache::Value>>> ActorCache::get(
     Key key, ReadOptions options) {
+  ActorStorageLimits::checkMaxKeySize(key);
+
   options.noCache = options.noCache || lru.options.noCache;
   requireNotTerminal();
 
@@ -561,6 +566,8 @@ public:
 
 kj::OneOf<ActorCache::GetResultList, kj::Promise<ActorCache::GetResultList>> ActorCache::get(
     kj::Array<Key> keys, ReadOptions options) {
+  ActorStorageLimits::checkMaxPairsCount(keys.size());
+
   options.noCache = options.noCache || lru.options.noCache;
   requireNotTerminal();
 
@@ -1842,6 +1849,9 @@ ActorCache::ReadCompletionChain::~ReadCompletionChain() noexcept(false) {
 // write operations
 
 kj::Maybe<kj::Promise<void>> ActorCache::put(Key key, Value value, WriteOptions options) {
+  ActorStorageLimits::checkMaxKeySize(key);
+  ActorStorageLimits::checkMaxValueSize(key, value);
+
   options.noCache = options.noCache || lru.options.noCache;
   requireNotTerminal();
   {
@@ -1855,6 +1865,12 @@ kj::Maybe<kj::Promise<void>> ActorCache::put(Key key, Value value, WriteOptions 
 }
 
 kj::Maybe<kj::Promise<void>> ActorCache::put(kj::Array<KeyValuePair> pairs, WriteOptions options) {
+  for (auto& pair: pairs) {
+    // We check limits in a separate loop to fail the whole operation when any pair fails a check
+    ActorStorageLimits::checkMaxKeySize(pair.key);
+    ActorStorageLimits::checkMaxValueSize(pair.key, pair.value);
+  }
+
   options.noCache = options.noCache || lru.options.noCache;
   requireNotTerminal();
   {
@@ -1911,6 +1927,8 @@ kj::OneOf<std::invoke_result_t<F>, kj::PromiseForResult<F, void>> mapPromise(
 }  // namespace
 
 kj::OneOf<bool, kj::Promise<bool>> ActorCache::delete_(Key key, WriteOptions options) {
+  ActorStorageLimits::checkMaxKeySize(key);
+
   options.noCache = options.noCache || lru.options.noCache;
   requireNotTerminal();
 
@@ -1935,6 +1953,10 @@ kj::OneOf<bool, kj::Promise<bool>> ActorCache::delete_(Key key, WriteOptions opt
 }
 
 kj::OneOf<uint, kj::Promise<uint>> ActorCache::delete_(kj::Array<Key> keys, WriteOptions options) {
+  for (auto& key: keys) {
+    ActorStorageLimits::checkMaxKeySize(key);
+  }
+
   options.noCache = options.noCache || lru.options.noCache;
   requireNotTerminal();
 
@@ -2158,8 +2180,7 @@ void ActorCache::ensureFlushScheduled(const WriteOptions& options) {
           hooks.updateAlarmInMemory(kj::none);
         }
       }
-      KJ_CASE_ONEOF(_, UnknownAlarmTime) {
-      }
+      KJ_CASE_ONEOF(_, UnknownAlarmTime) {}
     }
 
     return;
@@ -2429,8 +2450,7 @@ kj::Promise<void> ActorCache::startFlushTransaction() {
         maybeAlarmChange = DirtyAlarm{kj::none};
       }
     }
-    KJ_CASE_ONEOF(_, UnknownAlarmTime) {
-    }
+    KJ_CASE_ONEOF(_, UnknownAlarmTime) {}
   }
 
   // We have to remember _before_ waiting for the flush whether or not it was a pre-deleteAll()
@@ -2547,8 +2567,7 @@ kj::Promise<void> ActorCache::flushImpl(uint retryCount) {
           }
         }
       }
-      KJ_CASE_ONEOF(_, ActorCache::UnknownAlarmTime) {
-      }
+      KJ_CASE_ONEOF(_, ActorCache::UnknownAlarmTime) {}
     }
     if (flushingBeforeDeleteAll) {
       // The writes we flushed were writes that had occurred before a deleteAll. Now that they are
@@ -2939,8 +2958,7 @@ kj::Promise<void> ActorCache::flushImplUsingTxn(PutFlush putFlush,
         }
       }
     }
-    KJ_CASE_ONEOF(_, CleanAlarm) {
-    }
+    KJ_CASE_ONEOF(_, CleanAlarm) {}
   }
 
   // We have to wait on the transaction promise so we don't cancel the catch_ branch that triggers

@@ -3,14 +3,15 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "actor.h"
-#include "util.h"
+
 #include <workerd/io/features.h>
-#include <kj/encoding.h>
-#include <kj/compat/http.h>
+
 #include <capnp/compat/byte-stream.h>
 #include <capnp/compat/http-over-capnp.h>
-#include <capnp/schema.h>
 #include <capnp/message.h>
+#include <capnp/schema.h>
+#include <kj/compat/http.h>
+#include <kj/encoding.h>
 
 namespace workerd::api {
 
@@ -24,18 +25,18 @@ public:
     auto& context = IoContext::current();
 
     return context.getMetrics().wrapActorSubrequestClient(context.getSubrequest(
-        [&](SpanBuilder& span, IoChannelFactory& ioChannelFactory) {
-      if (span.isObserved()) {
-        span.setTag("actor_id"_kjc, kj::str(actorId));
+        [&](TraceContext& tracing, IoChannelFactory& ioChannelFactory) {
+      if (tracing.span.isObserved()) {
+        tracing.span.setTag("actor_id"_kjc, kj::str(actorId));
       }
 
       // Lazily initialize actorChannel
       if (actorChannel == kj::none) {
-        actorChannel = context.getColoLocalActorChannel(channelId, actorId, span);
+        actorChannel = context.getColoLocalActorChannel(channelId, actorId, tracing.span);
       }
 
       return KJ_REQUIRE_NONNULL(actorChannel)
-          ->startRequest({.cfBlobJson = kj::mv(cfStr), .parentSpan = span});
+          ->startRequest({.cfBlobJson = kj::mv(cfStr), .tracing = tracing});
     },
         {.inHouse = true,
           .wrapMetrics = true,
@@ -53,29 +54,31 @@ public:
   GlobalActorOutgoingFactory(uint channelId,
       jsg::Ref<DurableObjectId> id,
       kj::Maybe<kj::String> locationHint,
-      ActorGetMode mode)
+      ActorGetMode mode,
+      bool enableReplicaRouting)
       : channelId(channelId),
         id(kj::mv(id)),
         locationHint(kj::mv(locationHint)),
-        mode(mode) {}
+        mode(mode),
+        enableReplicaRouting(enableReplicaRouting) {}
 
   kj::Own<WorkerInterface> newSingleUseClient(kj::Maybe<kj::String> cfStr) override {
     auto& context = IoContext::current();
 
     return context.getMetrics().wrapActorSubrequestClient(context.getSubrequest(
-        [&](SpanBuilder& span, IoChannelFactory& ioChannelFactory) {
-      if (span.isObserved()) {
-        span.setTag("actor_id"_kjc, id->toString());
+        [&](TraceContext& tracing, IoChannelFactory& ioChannelFactory) {
+      if (tracing.span.isObserved()) {
+        tracing.span.setTag("actor_id"_kjc, id->toString());
       }
 
       // Lazily initialize actorChannel
       if (actorChannel == kj::none) {
-        actorChannel = context.getGlobalActorChannel(
-            channelId, id->getInner(), kj::mv(locationHint), mode, span);
+        actorChannel = context.getGlobalActorChannel(channelId, id->getInner(),
+            kj::mv(locationHint), mode, enableReplicaRouting, tracing.span);
       }
 
       return KJ_REQUIRE_NONNULL(actorChannel)
-          ->startRequest({.cfBlobJson = kj::mv(cfStr), .parentSpan = span});
+          ->startRequest({.cfBlobJson = kj::mv(cfStr), .tracing = tracing});
     },
         {.inHouse = true,
           .wrapMetrics = true,
@@ -87,6 +90,7 @@ private:
   jsg::Ref<DurableObjectId> id;
   kj::Maybe<kj::String> locationHint;
   ActorGetMode mode;
+  bool enableReplicaRouting;
   kj::Maybe<kj::Own<IoChannelFactory::ActorChannel>> actorChannel;
 };
 
@@ -147,8 +151,10 @@ jsg::Ref<DurableObject> DurableObjectNamespace::getImpl(jsg::Lock& js,
     locationHint = kj::mv(o.locationHint);
   }
 
-  auto outgoingFactory = context.addObject<Fetcher::OutgoingFactory>(
-      kj::heap<GlobalActorOutgoingFactory>(channel, id.addRef(), kj::mv(locationHint), mode));
+  bool enableReplicaRouting = FeatureFlags::get(js).getReplicaRouting();
+  auto outgoingFactory =
+      context.addObject<Fetcher::OutgoingFactory>(kj::heap<GlobalActorOutgoingFactory>(
+          channel, id.addRef(), kj::mv(locationHint), mode, enableReplicaRouting));
   auto requiresHost = FeatureFlags::get(js).getDurableObjectFetchRequiresSchemeAuthority()
       ? Fetcher::RequiresHostAndProtocol::YES
       : Fetcher::RequiresHostAndProtocol::NO;

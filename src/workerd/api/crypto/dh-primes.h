@@ -50,11 +50,11 @@
  * (eay@cryptsoft.com).  This product includes software written by Tim
  * Hudson (tjh@cryptsoft.com). */
 
-#include <openssl/dh.h>
+#pragma once
 
+#include <openssl/base.h>
 #include <openssl/bn.h>
-#include <openssl/err.h>
-#include <openssl/mem.h>
+#include <openssl/dh.h>
 
 extern "C" int bn_set_words(BIGNUM *bn, const BN_ULONG *words, size_t num);
 

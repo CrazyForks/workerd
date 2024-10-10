@@ -3,25 +3,30 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "sqlite.h"
+
+#include <workerd/util/sentry.h>
+
 #include <kj/debug.h>
 #include <kj/refcount.h>
 #include <kj/string-tree.h>
-#include <workerd/util/sentry.h>
 
 #if _WIN32
-#include <kj/win32-api-version.h>
 #include <windows.h>
+
+#include <kj/win32-api-version.h>
 #include <kj/windows-sanity.h>
 #else
 #include <unistd.h>
 #endif
 
 #include <fcntl.h>
-#include <sys/stat.h>
 #include <sqlite3.h>
-#include <kj/vector.h>
+#include <sys/stat.h>
+
 #include <kj/map.h>
 #include <kj/mutex.h>
+#include <kj/vector.h>
+
 #include <atomic>
 
 #if _WIN32
@@ -92,9 +97,10 @@ kj::String dbErrorMessage(int errorCode, sqlite3* db) {
 // Like KJ_REQUIRE() but give the Regulator a chance to report the error. `errorMessage` is either
 // the return value of sqlite3_errmsg() or a string literal containing a similarly
 // application-approriate error message. A reference called `regulator` must be in-scope.
-#define SQLITE_REQUIRE(condition, errorMessage, ...)                                               \
+// sqliteErrorCode is a kj::Maybe<int> and represents the error code from sqlite.
+#define SQLITE_REQUIRE(condition, sqliteErrorCode, errorMessage, ...)                              \
   if (!(condition)) {                                                                              \
-    regulator.onError(errorMessage);                                                               \
+    regulator.onError(sqliteErrorCode, errorMessage);                                              \
     KJ_FAIL_REQUIRE("SQLite failed", errorMessage, ##__VA_ARGS__);                                 \
   }
 
@@ -114,7 +120,7 @@ kj::String dbErrorMessage(int errorCode, sqlite3* db) {
     int _ec = code;                                                                                \
     /* SQLITE_MISUSE doesn't put error info on the database object, so check it separately */      \
     KJ_ASSERT(_ec != SQLITE_MISUSE, "SQLite misused: " #code, ##__VA_ARGS__);                      \
-    SQLITE_REQUIRE(_ec == SQLITE_OK, dbErrorMessage(_ec, db), ##__VA_ARGS__);                      \
+    SQLITE_REQUIRE(_ec == SQLITE_OK, _ec, dbErrorMessage(_ec, db), ##__VA_ARGS__);                 \
   } while (false)
 
 // Version of `SQLITE_CALL` that can be called after inspecting the error code, in case some codes
@@ -122,7 +128,7 @@ kj::String dbErrorMessage(int errorCode, sqlite3* db) {
 #define SQLITE_CALL_FAILED(code, error, ...)                                                       \
   do {                                                                                             \
     KJ_ASSERT(error != SQLITE_MISUSE, "SQLite misused: " code, ##__VA_ARGS__);                     \
-    SQLITE_REQUIRE(error == SQLITE_OK, dbErrorMessage(error, db), ##__VA_ARGS__);                  \
+    SQLITE_REQUIRE(error == SQLITE_OK, error, dbErrorMessage(error, db), ##__VA_ARGS__);           \
   } while (false);
 
 namespace {
@@ -367,10 +373,25 @@ static constexpr PragmaInfo ALLOWED_PRAGMAS[] = {{"data_version"_kj, PragmaSigna
 
 // =======================================================================================
 
+SqliteObserver SqliteObserver::DEFAULT = SqliteObserver{};
+
 constexpr SqliteDatabase::Regulator SqliteDatabase::TRUSTED;
 
-SqliteDatabase::SqliteDatabase(
-    const Vfs& vfs, kj::PathPtr path, kj::Maybe<kj::WriteMode> maybeMode) {
+SqliteDatabase::SqliteDatabase(const Vfs& vfs,
+    kj::Path path,
+    kj::Maybe<kj::WriteMode> maybeMode,
+    SqliteObserver& sqliteObserver)
+    : vfs(vfs),
+      path(kj::mv(path)),
+      readOnly(maybeMode == kj::none),
+      sqliteObserver(sqliteObserver) {
+  init(maybeMode);
+}
+
+void SqliteDatabase::init(kj::Maybe<kj::WriteMode> maybeMode) {
+  KJ_ASSERT(maybeDb == kj::none);
+  sqlite3* db = nullptr;
+
   KJ_IF_SOME(mode, maybeMode) {
     int flags = SQLITE_OPEN_READWRITE;
     if (kj::has(mode, kj::WriteMode::CREATE)) {
@@ -406,10 +427,14 @@ SqliteDatabase::SqliteDatabase(
 
   KJ_ON_SCOPE_FAILURE(sqlite3_close_v2(db));
 
-  setupSecurity();
+  setupSecurity(db);
+
+  maybeDb = *db;
 }
 
 SqliteDatabase::~SqliteDatabase() noexcept(false) {
+  sqlite3* db = &KJ_UNWRAP_OR(maybeDb, return);
+
   auto err = sqlite3_close(db);
   if (err == SQLITE_BUSY) {
     KJ_LOG(ERROR, "sqlite database destroyed while dependent objects still exist");
@@ -421,6 +446,10 @@ SqliteDatabase::~SqliteDatabase() noexcept(false) {
   KJ_REQUIRE(err == SQLITE_OK, sqlite3_errstr(err)) {
     break;
   }
+}
+
+SqliteDatabase::operator sqlite3*() {
+  return &KJ_ASSERT_NONNULL(maybeDb, "previous reset() failed");
 }
 
 void SqliteDatabase::notifyWrite() {
@@ -437,11 +466,104 @@ kj::StringPtr SqliteDatabase::getCurrentQueryForDebug() {
   }
 }
 
+void SqliteDatabase::applyChange(const StateChange& change) {
+  KJ_SWITCH_ONEOF(change) {
+    KJ_CASE_ONEOF(none, NoChange) {
+      // Nothing.
+    }
+
+    KJ_CASE_ONEOF(begin, BeginTxn) {
+      KJ_IF_SOME(name, begin.savepointName) {
+        savepoints.add(
+            Savepoint{.name = kj::str(name), .rollbackCallbackIndex = rollbackCallbacks.size()});
+      } else {
+        KJ_ASSERT(savepoints.empty(),
+            "BEGIN TRANSACTION should have failed when savepoints are present?");
+        KJ_ASSERT(
+            !inTransaction, "BEGIN TRANSACTION should have failed when already in a transaction?");
+        KJ_ASSERT(rollbackCallbacks.empty(),
+            "we shouldn't have been keeping rollback callbacks with no transaction open!");
+        inTransaction = true;
+      }
+    }
+
+    KJ_CASE_ONEOF(commit, CommitTxn) {
+      KJ_IF_SOME(name, commit.savepointName) {
+        // According to https://www.sqlite.org/lang_savepoint.html, releasing a savepoint also
+        // releases all later savepoints. In theory it seems like savepoints shouldn't need to
+        // be LIFO like this, but the docs say they are!
+        for (;;) {
+          KJ_ASSERT(!savepoints.empty(), "released a savepoint that didn't exist?");
+          auto sp = kj::mv(savepoints.back());
+          savepoints.removeLast();
+          if (sp.name == name) break;
+        }
+      } else {
+        KJ_ASSERT(inTransaction, "COMMIT TRANSACTION without BEGIN TRANSACTION?");
+
+        // Since BEGIN TRANSACTION cannot be nested within a savepoint, this must have released
+        // all savepoints implicitly.
+        savepoints.clear();
+        inTransaction = false;
+      }
+
+      if (savepoints.empty() && !inTransaction) {
+        // Transaction stack is empty, so the transaction is committed. We can release the rollback
+        // callbacks.
+        rollbackCallbacks.clear();
+      }
+    }
+
+    KJ_CASE_ONEOF(rollback, RollbackTxn) {
+      KJ_IF_SOME(name, rollback.savepointName) {
+        for (;;) {
+          KJ_ASSERT(!savepoints.empty(), "released a savepoint that didn't exist?");
+          if (savepoints.back().name == name) {
+            // Found the savepoint.
+            // Call all rollback callbacks later than the savepoint.
+            size_t index = savepoints.back().rollbackCallbackIndex;
+            KJ_ASSERT(rollbackCallbacks.size() >= index);
+            while (rollbackCallbacks.size() > index) {
+              rollbackCallbacks.back()();
+              rollbackCallbacks.removeLast();
+            }
+
+            // NOTE: Rolling back to a savepoint does not actually release the savepoint. Hence
+            //   we save this savepoint as the last item in `savepoints`. It must be released
+            //   separately.
+            break;
+          }
+
+          savepoints.removeLast();
+        }
+      } else {
+        KJ_ASSERT(inTransaction, "ROLLBACK TRANSACTION without BEGIN TRANSACTION?");
+
+        savepoints.clear();
+        inTransaction = false;
+
+        while (!rollbackCallbacks.empty()) {
+          rollbackCallbacks.back()();
+          rollbackCallbacks.removeLast();
+        }
+      }
+    }
+  }
+}
+
 // Set up the regulator that will be used for authorizer callbacks while preparing this
 // statement.
-kj::Own<sqlite3_stmt> SqliteDatabase::prepareSql(
+SqliteDatabase::StatementAndEffect SqliteDatabase::prepareSql(
     const Regulator& regulator, kj::StringPtr sqlCode, uint prepFlags, Multi multi) {
-  KJ_ASSERT(currentRegulator == kj::none, "recursive prepareSql()?");
+  sqlite3* db = &KJ_ASSERT_NONNULL(maybeDb, "previous reset() failed");
+
+  ParseContext parseContext;
+  KJ_ASSERT(currentParseContext == kj::none, "recursive prepareSql()?");
+  KJ_DEFER(currentParseContext = kj::none);
+  currentParseContext = parseContext;
+
+  KJ_ASSERT(currentRegulator == kj::none,
+      "can't prepare statements inside executeWithRegulator() callback");
   KJ_DEFER(currentRegulator = kj::none);
   currentRegulator = regulator;
 
@@ -449,8 +571,24 @@ kj::Own<sqlite3_stmt> SqliteDatabase::prepareSql(
     sqlite3_stmt* result;
     const char* tail;
 
-    SQLITE_CALL(sqlite3_prepare_v3(db, sqlCode.begin(), sqlCode.size(), prepFlags, &result, &tail));
-    SQLITE_REQUIRE(result != nullptr, "SQL code did not contain a statement.", sqlCode);
+    auto prepareResult =
+        sqlite3_prepare_v3(db, sqlCode.begin(), sqlCode.size(), prepFlags, &result, &tail);
+
+    // If we had an auth error specifically, check if we recorded a better error message during
+    // the authorizor callback.
+    if (prepareResult == SQLITE_AUTH) {
+      KJ_IF_SOME(error, parseContext.authError) {
+        // Throw the tailored auth error.
+        kj::throwFatalException(kj::mv(error));
+      }
+      // we don't have a better error, so fall back to SQLITE_CALL_FAILED below
+    }
+
+    if (prepareResult != SQLITE_OK) {
+      SQLITE_CALL_FAILED("sqlite3_prepare_v3", prepareResult);
+    }
+
+    SQLITE_REQUIRE(result != nullptr, kj::none, "SQL code did not contain a statement.", sqlCode);
     auto ownResult = ownSqlite(result);
 
     while (*tail == ' ' || *tail == '\t' || *tail == '\n' || *tail == '\r' || *tail == '\v' ||
@@ -459,7 +597,7 @@ kj::Own<sqlite3_stmt> SqliteDatabase::prepareSql(
 
     switch (multi) {
       case SINGLE:
-        SQLITE_REQUIRE(tail == sqlCode.end(),
+        SQLITE_REQUIRE(tail == sqlCode.end(), kj::none,
             "A prepared SQL statement must contain only one statement.", tail);
         break;
 
@@ -467,7 +605,7 @@ kj::Own<sqlite3_stmt> SqliteDatabase::prepareSql(
         if (tail != sqlCode.end()) {
           // There are more statements after this one, so execute this statement now.
 
-          SQLITE_REQUIRE(sqlite3_bind_parameter_count(result) == 0,
+          SQLITE_REQUIRE(sqlite3_bind_parameter_count(result) == 0, kj::none,
               "When executing multiple SQL statements in a single call, only the last statement "
               "can have parameters.");
 
@@ -492,6 +630,12 @@ kj::Own<sqlite3_stmt> SqliteDatabase::prepareSql(
             SQLITE_CALL_FAILED("sqlite3_step()", err);
           }
 
+          // Apply any state changes from executing the statement.
+          applyChange(parseContext.stateChange);
+
+          // Reset parse context for next statement.
+          parseContext = {};
+
           // Reduce `sqlCode` to include only what we haven't already executed.
           sqlCode = kj::StringPtr(tail, sqlCode.end());
           continue;
@@ -499,7 +643,7 @@ kj::Own<sqlite3_stmt> SqliteDatabase::prepareSql(
         break;
     }
 
-    return ownResult;
+    return {.statement = kj::mv(ownResult), .stateChange = kj::mv(parseContext.stateChange)};
   }
 }
 
@@ -543,6 +687,38 @@ void SqliteDatabase::executeWithRegulator(
   currentRegulator = regulator;
   KJ_DEFER(currentRegulator = kj::none);
   func();
+}
+
+void SqliteDatabase::reset() {
+  KJ_REQUIRE(!readOnly, "can't reset() read-only database");
+
+  // If transactions are open during reset(), whatever had the transaction open is going to get
+  // confused at best, or lose data at worst. Let's just not allow this.
+  KJ_REQUIRE(!inTransaction && savepoints.empty(), "can't reset() a database during a transaction");
+
+  // Temporarily disable the on-write callback while resetting.
+  auto writeCb = kj::mv(onWriteCallback);
+  KJ_DEFER(onWriteCallback = kj::mv(writeCb));
+
+  KJ_IF_SOME(db, maybeDb) {
+    for (auto& listener: resetListeners) {
+      listener.beforeSqliteReset();
+    }
+
+    auto err = sqlite3_close(&db);
+    KJ_REQUIRE(err == SQLITE_OK, "can't reset() database because dependent objects still exist",
+        sqlite3_errstr(err));
+
+    maybeDb = kj::none;
+    vfs.directory.remove(path);
+  }
+
+  KJ_ON_SCOPE_FAILURE(maybeDb = kj::none);
+  init(kj::WriteMode::CREATE | kj::WriteMode::MODIFY);
+
+  KJ_IF_SOME(resetCb, afterResetCallback) {
+    resetCb(*this);
+  }
 }
 
 bool SqliteDatabase::isAuthorized(int actionCode,
@@ -598,8 +774,10 @@ bool SqliteDatabase::isAuthorized(int actionCode,
     }
   }
 
-  if (&regulator == &TRUSTED) {
-    // Everything is allowed for trusted queries.
+  if (&regulator == &TRUSTED && actionCode != SQLITE_TRANSACTION &&
+      actionCode != SQLITE_SAVEPOINT) {
+    // Everything is allowed for trusted queries. (But transactions and savepoints need special
+    // handling below.)
     return true;
   }
 
@@ -641,20 +819,53 @@ bool SqliteDatabase::isAuthorized(int actionCode,
 
     case SQLITE_TRANSACTION: /* Operation       NULL            */
     {
-      // Verify param1 is one of the values we expect.
+      if (!regulator.allowTransactions()) {
+        return false;
+      }
+
       kj::StringPtr op = KJ_ASSERT_NONNULL(param1);
-      KJ_ASSERT(op == "BEGIN" || op == "ROLLBACK" || op == "COMMIT", op);
-    }
+      StateChange change;
+      if (op == "BEGIN") {
+        change = BeginTxn{kj::none};
+      } else if (op == "COMMIT") {
+        change = CommitTxn{kj::none};
+      } else if (op == "ROLLBACK") {
+        change = RollbackTxn{kj::none};
+      } else {
+        KJ_FAIL_ASSERT("unknown SQLITE_TRANSACTION op", op);
+      }
+      KJ_IF_SOME(ctx, currentParseContext) {
+        ctx.stateChange = kj::mv(change);
+      }
+
       KJ_ASSERT(param2 == nullptr);
-      return regulator.allowTransactions();
+      return true;
+    }
 
     case SQLITE_SAVEPOINT: /* Operation       Savepoint Name  */
     {
-      // Verify param1 is one of the values we expect.
+      kj::String name = kj::str(KJ_ASSERT_NONNULL(param2));
+      if (!regulator.allowTransactions() || !regulator.isAllowedName(name)) {
+        return false;
+      }
+
       kj::StringPtr op = KJ_ASSERT_NONNULL(param1);
-      KJ_ASSERT(op == "BEGIN" || op == "ROLLBACK" || op == "RELEASE", op);
+      StateChange change;
+      if (op == "BEGIN") {
+        change = BeginTxn{kj::mv(name)};
+      } else if (op == "RELEASE") {
+        change = CommitTxn{kj::mv(name)};
+      } else if (op == "ROLLBACK") {
+        change = RollbackTxn{kj::mv(name)};
+      } else {
+        KJ_FAIL_ASSERT("unknown SQLITE_TRANSACTION op", op);
+      }
+      KJ_IF_SOME(ctx, currentParseContext) {
+        ctx.stateChange = kj::mv(change);
+      }
+
+      return true;
     }
-      return regulator.allowTransactions() && regulator.isAllowedName(KJ_ASSERT_NONNULL(param2));
 
     case SQLITE_PRAGMA: /* Pragma Name     1st arg or NULL */
       // We currently only permit a few pragmas.
@@ -810,14 +1021,18 @@ bool SqliteDatabase::isAuthorizedTemp(int actionCode,
 
 // Set up security restrictions.
 // See: https://www.sqlite.org/security.html
-void SqliteDatabase::setupSecurity() {
+void SqliteDatabase::setupSecurity(sqlite3* db) {
   // 1. Set defensive mode.
   SQLITE_CALL_NODB(sqlite3_db_config(db, SQLITE_DBCONFIG_DEFENSIVE, 1, nullptr));
 
   // 2. Reduce limits
   // We use the suggested limits from the web site. Note that sqlite3_limit() does NOT return an
   // error code; it returns the old limit.
-  sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 1000000);
+
+  // This limit is set highter than what is suggested on sqlite.org/security.html
+  // because we want to allow storing values of 1MiB, and we added some extra
+  // padding on top of that
+  sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 2200000);
   sqlite3_limit(db, SQLITE_LIMIT_SQL_LENGTH, 100000);
   sqlite3_limit(db, SQLITE_LIMIT_COLUMN, 100);
   sqlite3_limit(db, SQLITE_LIMIT_EXPR_DEPTH, 100);
@@ -845,8 +1060,13 @@ void SqliteDatabase::setupSecurity() {
           ? SQLITE_OK
           : SQLITE_DENY;
     } catch (kj::Exception& e) {
-      // We'll crash if we throw to SQLite. Instead, log the error and deny.
-      KJ_LOG(ERROR, e);
+      // We'll crash if we throw to SQLite. Instead, shove the error into the parse context and
+      // report authorization denied. We'll pull it back out later.
+      KJ_IF_SOME(context, reinterpret_cast<SqliteDatabase*>(userdata)->currentParseContext) {
+        context.authError = kj::mv(e);
+      } else {
+        KJ_LOG(ERROR, e);
+      }
       return SQLITE_DENY;
     }
   },
@@ -886,16 +1106,32 @@ SqliteDatabase::Statement SqliteDatabase::prepare(
       *this, regulator, prepareSql(regulator, sqlCode, SQLITE_PREPARE_PERSISTENT, SINGLE));
 }
 
+SqliteDatabase::StatementAndEffect& SqliteDatabase::Statement::getStatementAndEffect() {
+  KJ_IF_SOME(sqlCode, stmt.tryGet<kj::String>()) {
+    // Database was reset. Recompile the statement against the new database. (This could throw,
+    // of course, if the statement depends on tables that haven't been recreated yet.)
+    stmt = db.prepareSql(regulator, sqlCode, SQLITE_PREPARE_PERSISTENT, SINGLE);
+  }
+
+  return KJ_ASSERT_NONNULL(stmt.tryGet<StatementAndEffect>());
+}
+
+void SqliteDatabase::Statement::beforeSqliteReset() {
+  KJ_IF_SOME(prepared, stmt.tryGet<StatementAndEffect>()) {
+    // Pull the original SQL code out of the statement and store it.
+    stmt = kj::str(sqlite3_sql(prepared.statement));
+  }
+}
+
 SqliteDatabase::Query::Query(SqliteDatabase& db,
     const Regulator& regulator,
     Statement& statement,
     kj::ArrayPtr<const ValuePtr> bindings)
-    : db(db),
+    : ResetListener(db),
       regulator(regulator),
-      statement(statement) {
-  // If the statement was used for a previous query, then its row counters contain data from that
-  // query's execution. Reset them to zero.
-  resetRowCounters();
+      maybeStatement(statement.getStatementAndEffect()) {
+  // If we throw from the constructor, the destructor won't run. Need to call destroy() explicitly.
+  KJ_ON_SCOPE_FAILURE(destroy());
   init(bindings);
 }
 
@@ -903,31 +1139,48 @@ SqliteDatabase::Query::Query(SqliteDatabase& db,
     const Regulator& regulator,
     kj::StringPtr sqlCode,
     kj::ArrayPtr<const ValuePtr> bindings)
-    : db(db),
+    : ResetListener(db),
       regulator(regulator),
       ownStatement(db.prepareSql(regulator, sqlCode, 0, MULTI)),
-      statement(ownStatement) {
+      maybeStatement(ownStatement) {
+  // If we throw from the constructor, the destructor won't run. Need to call destroy() explicitly.
+  KJ_ON_SCOPE_FAILURE(destroy());
   init(bindings);
 }
 
 SqliteDatabase::Query::~Query() noexcept(false) {
+  destroy();
+}
+
+void SqliteDatabase::Query::destroy() {
+  //Update the db stats that we have collected for the query
+  db.sqliteObserver.addQueryStats(rowsRead, rowsWritten);
+
   // We only need to reset the statement if we don't own it. If we own it, it's about to be
   // destroyed anyway.
-  if (ownStatement.get() == nullptr) {
-    // The error code returned by sqlite3_reset() actually represents the last error encountered
-    // when stepping the statement. This doesn't mean that the reset failed.
-    sqlite3_reset(statement);
+  if (ownStatement.statement.get() == nullptr) {
+    KJ_IF_SOME(statement, maybeStatement) {
+      // The error code returned by sqlite3_reset() actually represents the last error encountered
+      // when stepping the statement. This doesn't mean that the reset failed.
+      sqlite3_reset(statement.statement);
 
-    // sqlite3_clear_bindings() returns int, but there is no documentation on how the return code
-    // should be interpreted, so we ignore it.
-    sqlite3_clear_bindings(statement);
+      // sqlite3_clear_bindings() returns int, but there is no documentation on how the return code
+      // should be interpreted, so we ignore it.
+      sqlite3_clear_bindings(statement.statement);
+
+      // Reset the rows read/written counters.
+      sqlite3_stmt_status(statement.statement, LIBSQL_STMTSTATUS_ROWS_READ, 1);
+      sqlite3_stmt_status(statement.statement, LIBSQL_STMTSTATUS_ROWS_WRITTEN, 1);
+    }
   }
 }
 
 void SqliteDatabase::Query::checkRequirements(size_t size) {
-  SQLITE_REQUIRE(!sqlite3_stmt_busy(statement),
+  sqlite3_stmt* statement = getStatement();
+
+  SQLITE_REQUIRE(!sqlite3_stmt_busy(statement), kj::none,
       "A SQL prepared statement can only be executed once at a time.");
-  SQLITE_REQUIRE(size == sqlite3_bind_parameter_count(statement),
+  SQLITE_REQUIRE(size == sqlite3_bind_parameter_count(statement), kj::none,
       "Wrong number of parameter bindings for SQL query.");
 
   KJ_IF_SOME(cb, db.onWriteCallback) {
@@ -944,10 +1197,12 @@ void SqliteDatabase::Query::init(kj::ArrayPtr<const ValuePtr> bindings) {
     bind(i, bindings[i]);
   }
 
-  nextRow();
+  nextRow(/*first=*/true);
 }
 
 void SqliteDatabase::Query::bind(uint i, ValuePtr value) {
+  sqlite3_stmt* statement = getStatement();
+
   KJ_SWITCH_ONEOF(value) {
     KJ_CASE_ONEOF(blob, kj::ArrayPtr<const byte>) {
       SQLITE_CALL(sqlite3_bind_blob(statement, i + 1, blob.begin(), blob.size(), SQLITE_STATIC));
@@ -968,42 +1223,45 @@ void SqliteDatabase::Query::bind(uint i, ValuePtr value) {
 }
 
 uint64_t SqliteDatabase::Query::getRowsRead() {
+  sqlite3_stmt* statement = getStatement();
   KJ_REQUIRE(statement != nullptr);
   return sqlite3_stmt_status(statement, LIBSQL_STMTSTATUS_ROWS_READ, 0);
 }
 
 uint64_t SqliteDatabase::Query::getRowsWritten() {
-  KJ_REQUIRE(statement != nullptr);
+  sqlite3_stmt* statement = getStatement();
   return sqlite3_stmt_status(statement, LIBSQL_STMTSTATUS_ROWS_WRITTEN, 0);
 }
 
-void SqliteDatabase::Query::resetRowCounters() {
-  KJ_REQUIRE(statement != nullptr);
-  sqlite3_stmt_status(statement, LIBSQL_STMTSTATUS_ROWS_READ, 1);
-  sqlite3_stmt_status(statement, LIBSQL_STMTSTATUS_ROWS_WRITTEN, 1);
-}
-
 void SqliteDatabase::Query::bind(uint i, kj::ArrayPtr<const byte> value) {
+  sqlite3_stmt* statement = getStatement();
   SQLITE_CALL(sqlite3_bind_blob(statement, i + 1, value.begin(), value.size(), SQLITE_STATIC));
 }
 
 void SqliteDatabase::Query::bind(uint i, kj::StringPtr value) {
+  sqlite3_stmt* statement = getStatement();
   SQLITE_CALL(sqlite3_bind_text(statement, i + 1, value.begin(), value.size(), SQLITE_STATIC));
 }
 
 void SqliteDatabase::Query::bind(uint i, long long value) {
+  sqlite3_stmt* statement = getStatement();
   SQLITE_CALL(sqlite3_bind_int64(statement, i + 1, value));
 }
 
 void SqliteDatabase::Query::bind(uint i, double value) {
+  sqlite3_stmt* statement = getStatement();
   SQLITE_CALL(sqlite3_bind_double(statement, i + 1, value));
 }
 
 void SqliteDatabase::Query::bind(uint i, decltype(nullptr)) {
+  sqlite3_stmt* statement = getStatement();
   SQLITE_CALL(sqlite3_bind_null(statement, i + 1));
 }
 
-void SqliteDatabase::Query::nextRow() {
+void SqliteDatabase::Query::nextRow(bool first) {
+  auto& statementAndEffect = getStatementAndEffect();
+  sqlite3_stmt* statement = statementAndEffect.statement;
+
   KJ_ASSERT(db.currentStatement == kj::none, "recursive nextRow()?");
   KJ_DEFER(db.currentStatement = kj::none);
   db.currentStatement = *statement;
@@ -1014,10 +1272,20 @@ void SqliteDatabase::Query::nextRow() {
   db.currentRegulator = regulator;
 
   int err = sqlite3_step(statement);
+  // TODO(perf): This is slightly inefficient to call for every row read, but not bad enough to
+  // fix it immediately. The alternate way would be to getRowsRead/Written once when we emit it
+  // in the Dtor, and handle the case where the statement could be null when the Query gets destructed
+  rowsRead = getRowsRead();
+  rowsWritten = getRowsWritten();
   if (err == SQLITE_DONE) {
     done = true;
   } else if (err != SQLITE_ROW) {
     SQLITE_CALL_FAILED("sqlite3_step()", err);
+  }
+
+  if (first) {
+    // A statement's effect is applied on the first step.
+    db.applyChange(statementAndEffect.stateChange);
   }
 }
 
@@ -1029,10 +1297,12 @@ uint SqliteDatabase::Query::changeCount() {
 }
 
 uint SqliteDatabase::Query::columnCount() {
+  sqlite3_stmt* statement = getStatement();
   return sqlite3_column_count(statement);
 }
 
 SqliteDatabase::Query::ValuePtr SqliteDatabase::Query::getValue(uint column) {
+  sqlite3_stmt* statement = getStatement();
   switch (sqlite3_column_type(statement, column)) {
     case SQLITE_INTEGER:
       return getInt64(column);
@@ -1049,33 +1319,55 @@ SqliteDatabase::Query::ValuePtr SqliteDatabase::Query::getValue(uint column) {
 }
 
 kj::StringPtr SqliteDatabase::Query::getColumnName(uint column) {
+  sqlite3_stmt* statement = getStatement();
   return sqlite3_column_name(statement, column);
 }
 
 kj::ArrayPtr<const byte> SqliteDatabase::Query::getBlob(uint column) {
+  sqlite3_stmt* statement = getStatement();
   const byte* ptr = reinterpret_cast<const byte*>(sqlite3_column_blob(statement, column));
   return kj::arrayPtr(ptr, sqlite3_column_bytes(statement, column));
 }
 
 kj::StringPtr SqliteDatabase::Query::getText(uint column) {
+  sqlite3_stmt* statement = getStatement();
   const char* ptr = reinterpret_cast<const char*>(sqlite3_column_text(statement, column));
   return kj::StringPtr(ptr, sqlite3_column_bytes(statement, column));
 }
 
 int SqliteDatabase::Query::getInt(uint column) {
+  sqlite3_stmt* statement = getStatement();
   return sqlite3_column_int(statement, column);
 }
 
 int64_t SqliteDatabase::Query::getInt64(uint column) {
+  sqlite3_stmt* statement = getStatement();
   return sqlite3_column_int64(statement, column);
 }
 
 double SqliteDatabase::Query::getDouble(uint column) {
+  sqlite3_stmt* statement = getStatement();
   return sqlite3_column_double(statement, column);
 }
 
 bool SqliteDatabase::Query::isNull(uint column) {
+  sqlite3_stmt* statement = getStatement();
   return sqlite3_column_type(statement, column) == SQLITE_NULL;
+}
+
+SqliteDatabase::StatementAndEffect& SqliteDatabase::Query::getStatementAndEffect() {
+  return KJ_UNWRAP_OR(maybeStatement, {
+    regulator.onError(kj::none, "SQLite query was canceled because the database was deleted.");
+    KJ_FAIL_REQUIRE("query canceled because reset() was called on the database");
+  });
+}
+
+void SqliteDatabase::Query::beforeSqliteReset() {
+  // Note that if we don't own the statement, then `maybeStatement` is probably already dangling
+  // here. Luckily, we don't need to reset it or anything because the statement will be destroyed
+  // by Statement::beforeSqliteReset().
+  maybeStatement = kj::none;
+  ownStatement = {};
 }
 
 // =======================================================================================

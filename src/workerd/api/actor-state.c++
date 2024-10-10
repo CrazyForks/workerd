@@ -3,19 +3,22 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "actor-state.h"
+
 #include "actor.h"
+#include "sql.h"
 #include "util.h"
+
+#include <workerd/api/web-socket.h>
+#include <workerd/io/actor-cache.h>
+#include <workerd/io/actor-id.h>
+#include <workerd/io/actor-sqlite.h>
+#include <workerd/io/features.h>
+#include <workerd/io/hibernation-manager.h>
 #include <workerd/jsg/jsg.h>
 #include <workerd/jsg/ser.h>
 #include <workerd/jsg/util.h>
+
 #include <v8.h>
-#include <workerd/io/actor-cache.h>
-#include <workerd/io/actor-id.h>
-#include <workerd/io/actor-storage.h>
-#include <workerd/io/actor-sqlite.h>
-#include "sql.h"
-#include <workerd/api/web-socket.h>
-#include <workerd/io/hibernation-manager.h>
 
 namespace workerd::api {
 
@@ -244,8 +247,6 @@ jsg::Promise<jsg::JsRef<jsg::JsValue>> DurableObjectStorageOperations::get(jsg::
 
 jsg::Promise<jsg::JsRef<jsg::JsValue>> DurableObjectStorageOperations::getOne(
     jsg::Lock& js, kj::String key, const GetOptions& options) {
-  ActorStorageLimits::checkMaxKeySize(key);
-
   auto result = getCache(OP_GET).get(kj::str(key), options);
   return transformCacheResultWithCacheStatus(js, kj::mv(result), options,
       [key = kj::mv(key)](jsg::Lock& js, kj::Maybe<ActorCacheOps::Value> value, bool cached) {
@@ -458,10 +459,7 @@ jsg::Promise<void> DurableObjectStorageOperations::setAlarm(
 
 jsg::Promise<void> DurableObjectStorageOperations::putOne(
     jsg::Lock& js, kj::String key, jsg::JsValue value, const PutOptions& options) {
-  ActorStorageLimits::checkMaxKeySize(key);
-
   kj::Array<byte> buffer = serializeV8Value(js, value);
-  ActorStorageLimits::checkMaxValueSize(key, buffer);
 
   auto units = billingUnits(key.size() + buffer.size());
 
@@ -523,8 +521,6 @@ void DurableObjectTransaction::deleteAll() {
 
 jsg::Promise<bool> DurableObjectStorageOperations::deleteOne(
     jsg::Lock& js, kj::String key, const PutOptions& options) {
-  ActorStorageLimits::checkMaxKeySize(key);
-
   return transformCacheResult(
       js, getCache(OP_DELETE).delete_(kj::mv(key), options), options, [](jsg::Lock&, bool value) {
     currentActorMetrics().addStorageDeletes(1);
@@ -534,8 +530,6 @@ jsg::Promise<bool> DurableObjectStorageOperations::deleteOne(
 
 jsg::Promise<jsg::JsRef<jsg::JsValue>> DurableObjectStorageOperations::getMultiple(
     jsg::Lock& js, kj::Array<kj::String> keys, const GetOptions& options) {
-  ActorStorageLimits::checkMaxPairsCount(keys.size());
-
   auto numKeys = keys.size();
 
   return transformCacheResult(
@@ -553,10 +547,7 @@ jsg::Promise<void> DurableObjectStorageOperations::putMultiple(
     // deleting an undefined field is confusing, throwing could break otherwise working code, and
     // a stray undefined here or there is probably closer to what the user desires.
 
-    ActorStorageLimits::checkMaxKeySize(field.name);
-
     kj::Array<byte> buffer = serializeV8Value(js, field.value);
-    ActorStorageLimits::checkMaxValueSize(field.name, buffer);
 
     units += billingUnits(field.name.size() + buffer.size());
 
@@ -574,10 +565,6 @@ jsg::Promise<void> DurableObjectStorageOperations::putMultiple(
 
 jsg::Promise<int> DurableObjectStorageOperations::deleteMultiple(
     jsg::Lock& js, kj::Array<kj::String> keys, const PutOptions& options) {
-  for (auto& key: keys) {
-    ActorStorageLimits::checkMaxKeySize(key);
-  }
-
   auto numKeys = keys.size();
 
   return transformCacheResult(js, getCache(OP_DELETE).delete_(kj::mv(keys), options), options,
@@ -655,6 +642,11 @@ jsg::JsRef<jsg::JsValue> DurableObjectStorage::transactionSync(
     uint depth = transactionSyncDepth++;
     KJ_DEFER(--transactionSyncDepth);
 
+    // TODO(perf): SQLite actually allows multiple savepoints with the same name. The name refers
+    //   to the most-recent of these savepoints. This means we don't actually have to append the
+    //   depth to each savepoint name like I originally thought. We should refactor this -- and use
+    //   prepared statements.
+
     sqlite.run(SqliteDatabase::TRUSTED, kj::str("SAVEPOINT _cf_sync_savepoint_", depth));
     return js.tryCatch([&]() {
       auto result = callback(js);
@@ -662,6 +654,7 @@ jsg::JsRef<jsg::JsValue> DurableObjectStorage::transactionSync(
       return kj::mv(result);
     }, [&](jsg::Value exception) -> jsg::JsRef<jsg::JsValue> {
       sqlite.run(SqliteDatabase::TRUSTED, kj::str("ROLLBACK TO _cf_sync_savepoint_", depth));
+      sqlite.run(SqliteDatabase::TRUSTED, kj::str("RELEASE _cf_sync_savepoint_", depth));
       js.throwException(kj::mv(exception));
     });
   } else {
@@ -685,12 +678,49 @@ jsg::Promise<void> DurableObjectStorage::sync(jsg::Lock& js) {
   }
 }
 
-jsg::Ref<SqlStorage> DurableObjectStorage::getSql(jsg::Lock& js) {
+SqliteDatabase& DurableObjectStorage::getSqliteDb(jsg::Lock& js) {
   KJ_IF_SOME(db, cache->getSqliteDatabase()) {
-    return jsg::alloc<SqlStorage>(db, JSG_THIS);
+    // Actor is SQLite-backed but let's make sure SQL is configured to be enabled.
+    if (enableSql) {
+      return db;
+    } else if (FeatureFlags::get(js).getWorkerdExperimental()) {
+      // For backwards-compatibility, if the `experimental` compat flag is on, enable SQL. This is
+      // deprecated, though, so warn in this case.
+
+      // TODO(soon): Uncomment this warning after the D1 simulator has been updated to use
+      //   `enableSql`. Otherwise, people doing local dev against D1 may see the warning
+      //   spuriously.
+
+      // IoContext::current().logWarningOnce(
+      //     "Enabling SQL API based on the 'experimental' flag, but this will stop working soon. "
+      //     "Instead, please set `enableSql = true` in your workerd config for the DO namespace. "
+      //     "If using wrangler, under `[[migrations]]` in wrangler.toml, change `new_classes` to "
+      //     "`new_sqlite_classes`.");
+
+      return db;
+    } else {
+      // We're presumably running local workerd, which always uses SQLite for DO storage, but we're
+      // trying to simulate a non-SQLite DO namespace for testing purposes.
+      JSG_FAIL_REQUIRE(Error,
+          "SQL is not enabled for this Durable Object class. To enable it, set "
+          "`enableSql = true` in your workerd config for the class. If using wrangler, "
+          "under `[[migrations]]` in wrangler.toml, change `new_classes` to "
+          "`new_sqlite_classes`. Note that this change cannot be made after the class is "
+          "already deployed to production.");
+    }
   } else {
-    JSG_FAIL_REQUIRE(Error, "Durable Object is not backed by SQL.");
+    // We're in production (not local workerd) and this DO namespace is not backed by SQLite.
+    JSG_FAIL_REQUIRE(Error,
+        "This Durable Object is not backed by SQLite storage, so the SQL API is not available. "
+        "SQL can be enabled on a new Durable Object class by using the `new_sqlite_classes` "
+        "instead of `new_classes` under `[[migrations]]` in your wrangler.toml, but an "
+        "already-deployed class cannot be converted to SQLite (except by deleting the existing "
+        "data).");
   }
+}
+
+jsg::Ref<SqlStorage> DurableObjectStorage::getSql(jsg::Lock& js) {
+  return jsg::alloc<SqlStorage>(JSG_THIS);
 }
 
 kj::Promise<kj::String> DurableObjectStorage::getCurrentBookmark() {

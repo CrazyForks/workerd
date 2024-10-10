@@ -3,10 +3,13 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "url.h"
+
+#include <openssl/rand.h>
+
 #include <kj/table.h>
 #include <kj/test.h>
+
 #include <regex>
-#include <openssl/rand.h>
 
 namespace workerd::jsg::test {
 namespace {
@@ -1926,26 +1929,20 @@ KJ_TEST("URLPattern - simple fuzzing") {
                       .search = kj::str(bufs.slice(n * 6, n * 7)),
                       .hash = kj::str(bufs.slice(n * 7, n * 8)),
                       .baseUrl = kj::str(bufs.slice(n * 8, n * 9))})) {
-      KJ_CASE_ONEOF(str, kj::String) {
-      }
-      KJ_CASE_ONEOF(pattern, UrlPattern) {
-      }
+      KJ_CASE_ONEOF(str, kj::String) {}
+      KJ_CASE_ONEOF(pattern, UrlPattern) {}
     }
 
     auto input = kj::str(bufs);
     KJ_SWITCH_ONEOF(UrlPattern::tryCompile(input.asPtr())) {
-      KJ_CASE_ONEOF(str, kj::String) {
-      }
-      KJ_CASE_ONEOF(pattern, UrlPattern) {
-      }
+      KJ_CASE_ONEOF(str, kj::String) {}
+      KJ_CASE_ONEOF(pattern, UrlPattern) {}
     }
 
     KJ_SWITCH_ONEOF(UrlPattern::tryCompile(
                         input.asPtr(), UrlPattern::CompileOptions{.baseUrl = input.asPtr()})) {
-      KJ_CASE_ONEOF(str, kj::String) {
-      }
-      KJ_CASE_ONEOF(pattern, UrlPattern) {
-      }
+      KJ_CASE_ONEOF(str, kj::String) {}
+      KJ_CASE_ONEOF(pattern, UrlPattern) {}
     }
   }
 }
@@ -2350,8 +2347,7 @@ KJ_TEST("URLPattern - WPT compile success") {
 
   for (auto& testCase: TESTS) {
     KJ_SWITCH_ONEOF(UrlPattern::tryCompile(kj::mv(testCase))) {
-      KJ_CASE_ONEOF(pattern, UrlPattern) {
-      }
+      KJ_CASE_ONEOF(pattern, UrlPattern) {}
       KJ_CASE_ONEOF(err, kj::String) {
         KJ_FAIL_ASSERT("Failed to compile URLPattern", err);
       }
@@ -2362,16 +2358,14 @@ KJ_TEST("URLPattern - WPT compile success") {
     KJ_IF_SOME(base, testCase.base) {
       KJ_SWITCH_ONEOF(UrlPattern::tryCompile(
                           testCase.input, UrlPattern::CompileOptions{.baseUrl = base})) {
-        KJ_CASE_ONEOF(pattern, UrlPattern) {
-        }
+        KJ_CASE_ONEOF(pattern, UrlPattern) {}
         KJ_CASE_ONEOF(err, kj::String) {
           KJ_FAIL_ASSERT("Failed to compile URLPattern", err);
         }
       }
     } else {
       KJ_SWITCH_ONEOF(UrlPattern::tryCompile(testCase.input)) {
-        KJ_CASE_ONEOF(pattern, UrlPattern) {
-        }
+        KJ_CASE_ONEOF(pattern, UrlPattern) {}
         KJ_CASE_ONEOF(err, kj::String) {
           KJ_FAIL_ASSERT("Failed to compile URLPattern", err);
         }

@@ -4,17 +4,18 @@
 
 #pragma once
 
+#include <workerd/api/memory-cache.h>
+#include <workerd/api/pyodide/pyodide.h>
+#include <workerd/io/worker.h>
+#include <workerd/server/alarm-scheduler.h>
+#include <workerd/server/workerd.capnp.h>
+#include <workerd/util/sqlite.h>
+
+#include <kj/async-io.h>
+#include <kj/compat/http.h>
 #include <kj/filesystem.h>
 #include <kj/map.h>
 #include <kj/one-of.h>
-#include <kj/async-io.h>
-#include <workerd/io/worker.h>
-#include <workerd/api/memory-cache.h>
-#include <workerd/api/pyodide/pyodide.h>
-#include <workerd/server/workerd.capnp.h>
-#include <workerd/util/sqlite.h>
-#include <workerd/server/alarm-scheduler.h>
-#include <kj/compat/http.h>
 
 namespace kj {
 class TlsContext;
@@ -97,9 +98,11 @@ public:
   struct Durable {
     kj::String uniqueKey;
     bool isEvictable;
+    bool enableSql;
   };
   struct Ephemeral {
     bool isEvictable;
+    bool enableSql;
   };
   using ActorConfig = kj::OneOf<Durable, Ephemeral>;
 

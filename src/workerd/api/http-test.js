@@ -141,9 +141,33 @@ export const inspect = {
       body: 'message',
       headers: { 'Content-Type': 'text/plain' },
     });
-    assert.strictEqual(
-      util.inspect(request),
-      `Request {
+    if (env.CACHE_ENABLED) {
+      assert.strictEqual(
+        util.inspect(request),
+        `Request {
+  method: 'POST',
+  url: 'http://placeholder',
+  headers: Headers(1) { 'content-type' => 'text/plain', [immutable]: false },
+  redirect: 'follow',
+  fetcher: null,
+  signal: AbortSignal { aborted: false, reason: undefined, onabort: null },
+  cf: undefined,
+  integrity: '',
+  keepalive: false,
+  cache: undefined,
+  body: ReadableStream {
+    locked: false,
+    [state]: 'readable',
+    [supportsBYOB]: true,
+    [length]: 7n
+  },
+  bodyUsed: false
+}`
+      );
+    } else {
+      assert.strictEqual(
+        util.inspect(request),
+        `Request {
   method: 'POST',
   url: 'http://placeholder',
   headers: Headers(1) { 'content-type' => 'text/plain', [immutable]: false },
@@ -161,7 +185,8 @@ export const inspect = {
   },
   bodyUsed: false
 }`
-    );
+      );
+    }
 
     // Check response with immutable headers
     const response = await env.SERVICE.fetch('http://placeholder/not-found');
@@ -252,7 +277,7 @@ async function assertFetchCacheRejectsError(
 ) {
   await assert.rejects(
     (async () => {
-      await fetch('http://example.org', { cache: cacheHeader });
+      await fetch('https://example.org', { cache: cacheHeader });
     })(),
     {
       name: errorName,
@@ -262,19 +287,69 @@ async function assertFetchCacheRejectsError(
 }
 
 export const cacheMode = {
-  async test() {
-    assert.strictEqual('cache' in Request.prototype, false);
+  async test(ctrl, env, ctx) {
+    var failureCases = [
+      'default',
+      'force-cache',
+      'no-cache',
+      'only-if-cached',
+      'reload',
+      'unsupported',
+    ];
+    assert.strictEqual('cache' in Request.prototype, env.CACHE_ENABLED);
     {
       const req = new Request('https://example.org', {});
       assert.strictEqual(req.cache, undefined);
     }
-    await assertRequestCacheThrowsError('no-store');
-    await assertRequestCacheThrowsError('no-cache');
-    await assertRequestCacheThrowsError('no-transform');
-    await assertRequestCacheThrowsError('unsupported');
-    await assertFetchCacheRejectsError('no-store');
-    await assertFetchCacheRejectsError('no-cache');
-    await assertFetchCacheRejectsError('no-transform');
-    await assertFetchCacheRejectsError('unsupported');
+    if (!env.CACHE_ENABLED) {
+      failureCases.push('no-store');
+      for (const cacheMode in failureCases) {
+        await assertRequestCacheThrowsError(cacheMode);
+        await assertFetchCacheRejectsError(cacheMode);
+      }
+    } else {
+      {
+        const req = new Request('https://example.org', { cache: 'no-store' });
+        assert.strictEqual(req.cache, 'no-store');
+      }
+      {
+        const response = await env.SERVICE.fetch(
+          'http://placeholder/not-found',
+          { cache: 'no-store' }
+        );
+        assert.strictEqual(
+          util.inspect(response),
+          `Response {
+  status: 404,
+  statusText: 'Not Found',
+  headers: Headers(0) { [immutable]: true },
+  ok: false,
+  redirected: false,
+  url: 'http://placeholder/not-found',
+  webSocket: null,
+  cf: undefined,
+  body: ReadableStream {
+    locked: false,
+    [state]: 'readable',
+    [supportsBYOB]: true,
+    [length]: 0n
+  },
+  bodyUsed: false
+}`
+        );
+      }
+      for (const cacheMode in failureCases) {
+        await assertRequestCacheThrowsError(
+          cacheMode,
+          'TypeError',
+          'Unsupported cache mode: ' + cacheMode
+        );
+        await assertFetchCacheRejectsError(
+          cacheMode,
+          'TypeError',
+          'Unsupported cache mode: ' + cacheMode
+        );
+      }
+    }
   },
 };

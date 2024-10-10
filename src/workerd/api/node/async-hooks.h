@@ -3,10 +3,9 @@
 //     https://opensource.org/licenses/Apache-2.0
 #pragma once
 
-#include <workerd/jsg/jsg.h>
 #include <workerd/io/compatibility-date.capnp.h>
 #include <workerd/jsg/async-context.h>
-#include <kj/table.h>
+#include <workerd/jsg/jsg.h>
 
 namespace workerd::api::node {
 

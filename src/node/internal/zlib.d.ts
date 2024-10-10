@@ -1,6 +1,40 @@
 import { owner_symbol, type Zlib } from 'node-internal:internal_zlib_base';
 
-export function crc32(data: ArrayBufferView, value: number): number;
+type InternalCompressCallback = (res: Error | ArrayBuffer) => void;
+
+export function crc32(data: ArrayBufferView | string, value: number): number;
+
+export function zlibSync(
+  data: ArrayBufferView | string,
+  options: ZlibOptions,
+  mode: number
+): ArrayBuffer;
+export function zlib(
+  data: ArrayBufferView | string,
+  options: ZlibOptions,
+  mode: number,
+  cb: InternalCompressCallback
+): void;
+
+export function brotliDecompressSync(
+  data: ArrayBufferView | string,
+  options: BrotliOptions
+): ArrayBuffer;
+export function brotliDecompress(
+  data: ArrayBufferView | string,
+  options: BrotliOptions,
+  cb: InternalCompressCallback
+): void;
+
+export function brotliCompressSync(
+  data: ArrayBufferView | string,
+  options: BrotliOptions
+): ArrayBuffer;
+export function brotliCompress(
+  data: ArrayBufferView | string,
+  options: BrotliOptions,
+  cb: InternalCompressCallback
+): void;
 
 // zlib.constants (part of the API contract for node:zlib)
 export const CONST_Z_NO_FLUSH: number;
@@ -129,12 +163,25 @@ export interface ZlibOptions {
   maxOutputLength?: number | undefined;
 }
 
+export interface BrotliOptions {
+  flush?: number | undefined;
+  finishFlush?: number | undefined;
+  chunkSize?: number | undefined;
+  params?:
+    | {
+        [key: number]: boolean | number;
+      }
+    | undefined;
+  maxOutputLength?: number | undefined;
+  // Not specified in NodeJS docs but the tests expect it
+  info?: boolean | undefined;
+}
+
 type ErrorHandler = (errno: number, code: string, message: string) => void;
 type ProcessHandler = () => void;
 
-export class ZlibStream {
+export abstract class CompressionStream {
   public [owner_symbol]: Zlib;
-
   // Not used by C++ implementation but required to be Node.js compatible.
   public inOff: number;
   /* eslint-disable-next-line @typescript-eslint/no-redundant-type-constituents */
@@ -145,15 +192,6 @@ export class ZlibStream {
   public flushFlag: number;
 
   public constructor(mode: number);
-  public initialize(
-    windowBits: number,
-    level: number,
-    memLevel: number,
-    strategy: number,
-    writeState: NodeJS.TypedArray,
-    processCallback: ProcessHandler,
-    dictionary: ZlibOptions['dictionary']
-  ): void;
   public close(): void;
   public write(
     flushFlag: number,
@@ -164,8 +202,48 @@ export class ZlibStream {
     outputOffset: number,
     outputLength: number
   ): void;
-  public params(level: number, strategy: number): void;
+  public writeSync(
+    flushFlag: number,
+    inputBuffer: NodeJS.TypedArray,
+    inputOffset: number,
+    inputLength: number,
+    outputBuffer: NodeJS.TypedArray,
+    outputOffset: number,
+    outputLength: number
+  ): void;
   public reset(): void;
 
+  // Workerd specific functions
   public setErrorHandler(cb: ErrorHandler): void;
+}
+
+export class ZlibStream extends CompressionStream {
+  public initialize(
+    windowBits: number,
+    level: number,
+    memLevel: number,
+    strategy: number,
+    writeState: NodeJS.TypedArray,
+    processCallback: ProcessHandler,
+    dictionary: ZlibOptions['dictionary']
+  ): void;
+  public params(level: number, strategy: number): void;
+}
+
+export class BrotliDecoder extends CompressionStream {
+  public initialize(
+    params: Uint32Array,
+    writeResult: Uint32Array,
+    writeCallback: () => void
+  ): boolean;
+  public params(): void;
+}
+
+export class BrotliEncoder extends CompressionStream {
+  public initialize(
+    params: Uint32Array,
+    writeResult: Uint32Array,
+    writeCallback: () => void
+  ): boolean;
+  public params(): void;
 }

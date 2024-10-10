@@ -3,6 +3,7 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 import * as assert from 'node:assert';
+import { DurableObject } from 'cloudflare:workers';
 
 async function test(state) {
   const storage = state.storage;
@@ -59,6 +60,64 @@ async function test(state) {
     assert.equal(result[0]['value'], 1);
     assert.equal(result[1]['value'], 2);
     assert.equal(result[2]['value'], 3);
+  }
+
+  {
+    // Test multiple rows, manual iteration with next().
+    const cursor = sql.exec(
+      'SELECT 1 AS col\n' +
+        'UNION ALL\n' +
+        'SELECT "foo" AS col\n' +
+        'UNION ALL\n' +
+        'SELECT 3 AS col;'
+    );
+    assert.deepEqual(cursor.next(), { done: false, value: { col: 1 } });
+    assert.deepEqual(cursor.next(), { done: false, value: { col: 'foo' } });
+    assert.deepEqual(cursor.next(), { done: false, value: { col: 3 } });
+    assert.deepEqual(cursor.next(), { done: true });
+  }
+
+  {
+    // Test multiple rows using .toArray()
+    const cursor = sql.exec(
+      'SELECT 1 AS value\n' +
+        'UNION ALL\n' +
+        'SELECT "foo" AS value\n' +
+        'UNION ALL\n' +
+        'SELECT 3 AS value;'
+    );
+    assert.deepEqual(cursor.toArray(), [
+      { value: 1 },
+      { value: 'foo' },
+      { value: 3 },
+    ]);
+  }
+
+  {
+    // Test one row with .one()
+    let cursor = sql.exec('SELECT 123 AS foo, "abc" AS bar');
+    assert.deepEqual(cursor.one(), { foo: 123, bar: 'abc' });
+    // Cursor has been consumed.
+    assert.deepEqual([...cursor], []);
+
+    // Multiple results throws.
+    assert.throws(
+      () =>
+        sql
+          .exec(
+            'SELECT 1 AS value\n' + 'UNION ALL\n' + 'SELECT "foo" AS value;'
+          )
+          .one(),
+      /Expected exactly one result from SQL query, but got multiple results/
+    );
+
+    // No results throws.
+    sql.exec('CREATE TABLE IF NOT EXISTS empty (x INTEGER)');
+    assert.throws(
+      () => sql.exec('SELECT * from empty;').one(),
+      /Expected exactly one result from SQL query, but got no results/
+    );
+    sql.exec('DROP TABLE empty');
   }
 
   // Test partial query ingestion
@@ -397,8 +456,14 @@ async function test(state) {
   );
 
   // Can't start transactions or savepoints.
-  assert.throws(() => sql.exec('BEGIN TRANSACTION'), /not authorized/);
-  assert.throws(() => sql.exec('SAVEPOINT foo'), /not authorized/);
+  assert.throws(
+    () => sql.exec('BEGIN TRANSACTION'),
+    /please use the state.storage.transaction\(\) or state.storage.transactionSync\(\) APIs/
+  );
+  assert.throws(
+    () => sql.exec('SAVEPOINT foo'),
+    /please use the state.storage.transaction\(\) or state.storage.transactionSync\(\) APIs/
+  );
 
   // Virtual tables
   // Only fts5 and fts5vocab modules are allowed
@@ -1145,8 +1210,9 @@ async function testStreamingIngestion(request, storage) {
   );
 }
 
-export class DurableObjectExample {
+export class DurableObjectExample extends DurableObject {
   constructor(state, env) {
+    super(state, env);
     this.state = state;
   }
 
@@ -1177,10 +1243,57 @@ export class DurableObjectExample {
     } else if (req.url.endsWith('/streaming-ingestion')) {
       await testStreamingIngestion(req, this.state.storage);
       return Response.json({ ok: true });
+    } else if (req.url.endsWith('/deleteAll')) {
+      this.state.storage.put('counter', 888); // will be deleted
+      this.state.storage.deleteAll();
+      assert.strictEqual(await this.state.storage.get('counter'), undefined);
+      return Response.json({ ok: true });
     }
 
     throw new Error('unknown url: ' + req.url);
   }
+
+  async testRollbackKvInit() {
+    // Test what happens if initialization of the _cf_KV table gets rolled back.
+
+    try {
+      this.state.storage.transactionSync(() => {
+        // Cause KV table to be initialized.
+        this.state.storage.put('foo', 123);
+
+        // Roll back the transaction by throwing.
+        throw new Error('bar');
+      });
+      throw new Error('expected error');
+    } catch (err) {
+      if (err.message != 'bar') throw err;
+    }
+
+    // Now try to put to KV again. This will create the `_cf_KV` table again.
+    await this.state.storage.put('foo', 456);
+  }
+
+  async testRollbackAlarmInit() {
+    // Much like testRollbackKvInit() but for alarms.
+
+    try {
+      this.state.storage.transactionSync(() => {
+        // Cause KV table to be initialized.
+        this.state.storage.setAlarm(Date.now() + 86400 * 365);
+
+        // Roll back the transaction by throwing.
+        throw new Error('bar');
+      });
+      throw new Error('expected error');
+    } catch (err) {
+      if (err.message != 'bar') throw err;
+    }
+
+    assert.strictEqual(await this.state.storage.getAlarm(), null);
+    await this.state.storage.setAlarm(Date.now() + 86400 * 365);
+  }
+
+  async alarm() {}
 }
 
 export default {
@@ -1251,6 +1364,19 @@ export default {
 
     // Everything's still consistent.
     assert.equal(await doReq('increment'), 3);
+
+    // Delete all: increments start over
+    await doReq('deleteAll');
+    assert.equal(await doReq('increment'), 1);
+    assert.equal(await doReq('increment'), 2);
+  },
+};
+
+export let testRollbackKvInit = {
+  async test(ctrl, env, ctx) {
+    let stub = env.ns.get(env.ns.idFromName('rollback-kv-test'));
+    await stub.testRollbackKvInit();
+    await stub.testRollbackAlarmInit();
   },
 };
 

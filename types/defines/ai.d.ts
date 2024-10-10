@@ -156,7 +156,7 @@ export type AiTextToImageInput = {
   strength?: number;
   guidance?: number;
 };
-export type AiTextToImageOutput = Uint8Array;
+export type AiTextToImageOutput = ReadableStream<Uint8Array>;
 export declare abstract class BaseAiTextToImage {
   inputs: AiTextToImageInput;
   postProcessedOutputs: AiTextToImageOutput;
@@ -175,9 +175,11 @@ export declare abstract class BaseAiTranslation {
 }
 export type GatewayOptions = {
   id: string;
+  cacheKey?: string;
   cacheTtl?: number;
   skipCache?: boolean;
   metadata?: Record<string, number | string | boolean | null | bigint>;
+  collectLog?: boolean;
 };
 export type AiOptions = {
   gateway?: GatewayOptions;

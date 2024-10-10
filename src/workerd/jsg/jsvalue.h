@@ -1,6 +1,7 @@
 #pragma once
 
 #include "jsg.h"
+
 #include <v8.h>
 
 namespace workerd::jsg {
@@ -341,6 +342,8 @@ public:
 
   void set(Lock& js, const JsValue& name, const JsValue& value);
   void set(Lock& js, kj::StringPtr name, const JsValue& value);
+  void setReadOnly(Lock& js, kj::StringPtr name, const JsValue& value);
+  void setNonEnumerable(Lock& js, const JsSymbol& name, const JsValue& value);
   JsValue get(Lock& js, const JsValue& name) KJ_WARN_UNUSED_RESULT;
   JsValue get(Lock& js, kj::StringPtr name) KJ_WARN_UNUSED_RESULT;
 
@@ -377,6 +380,7 @@ public:
   using JsBase<v8::Object, JsObject>::JsBase;
 
   void recursivelyFreeze(Lock&);
+  void seal(Lock&);
   JsObject jsonClone(Lock&);
 };
 
@@ -448,6 +452,14 @@ inline JsSet Lock::set(const Args&... args) {
   auto set = v8::Set::New(v8Isolate);
   (check(set->Add(v8Context(), args.inner)), ...);
   return JsSet(set);
+}
+
+template <typename T>
+inline JsObject Lock::opaque(T&& inner) {
+  auto wrapped = wrapOpaque(v8Context(), kj::mv(inner));
+  KJ_ASSERT(!wrapped.IsEmpty());
+  KJ_ASSERT(wrapped->IsObject());
+  return JsObject(wrapped.template As<v8::Object>());
 }
 
 // A persistent handle for a Js* type suitable for storage and gc visitable.

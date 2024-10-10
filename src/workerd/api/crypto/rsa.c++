@@ -1,14 +1,19 @@
 #include "rsa.h"
+
 #include "impl.h"
 #include "keys.h"
-#include <kj/common.h>
-#include <kj/array.h>
+#include "simdutf.h"
+#include "util.h"
+
 #include <openssl/bn.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
+
+#include <kj/array.h>
+#include <kj/common.h>
+
 #include <map>
-#include "simdutf.h"
 
 namespace workerd::api {
 
@@ -231,16 +236,21 @@ SubtleCrypto::JsonWebKey Rsa::toJwk(
     jwk.alg = kj::mv(name);
   }
 
-  jwk.n = kj::encodeBase64Url(KJ_REQUIRE_NONNULL(bignumToArray(KJ_REQUIRE_NONNULL(n))));
-  jwk.e = kj::encodeBase64Url(KJ_REQUIRE_NONNULL(bignumToArray(KJ_REQUIRE_NONNULL(e))));
+  jwk.n = fastEncodeBase64Url(KJ_REQUIRE_NONNULL(bignumToArray(KJ_REQUIRE_NONNULL(n))));
+  jwk.e = fastEncodeBase64Url(KJ_REQUIRE_NONNULL(bignumToArray(KJ_REQUIRE_NONNULL(e))));
 
   if (keyType == KeyType::PRIVATE) {
-    jwk.d = kj::encodeBase64Url(KJ_REQUIRE_NONNULL(bignumToArray(KJ_REQUIRE_NONNULL(d))));
-    jwk.p = kj::encodeBase64Url(KJ_REQUIRE_NONNULL(bignumToArray(KJ_REQUIRE_NONNULL(rsa->p))));
-    jwk.q = kj::encodeBase64Url(KJ_REQUIRE_NONNULL(bignumToArray(KJ_REQUIRE_NONNULL(rsa->q))));
-    jwk.dp = kj::encodeBase64Url(KJ_REQUIRE_NONNULL(bignumToArray(KJ_REQUIRE_NONNULL(rsa->dmp1))));
-    jwk.dq = kj::encodeBase64Url(KJ_REQUIRE_NONNULL(bignumToArray(KJ_REQUIRE_NONNULL(rsa->dmq1))));
-    jwk.qi = kj::encodeBase64Url(KJ_REQUIRE_NONNULL(bignumToArray(KJ_REQUIRE_NONNULL(rsa->iqmp))));
+    jwk.d = fastEncodeBase64Url(KJ_REQUIRE_NONNULL(bignumToArray(KJ_REQUIRE_NONNULL(d))));
+    jwk.p =
+        fastEncodeBase64Url(KJ_REQUIRE_NONNULL(bignumToArray(KJ_REQUIRE_NONNULL(RSA_get0_p(rsa)))));
+    jwk.q =
+        fastEncodeBase64Url(KJ_REQUIRE_NONNULL(bignumToArray(KJ_REQUIRE_NONNULL(RSA_get0_q(rsa)))));
+    jwk.dp = fastEncodeBase64Url(
+        KJ_REQUIRE_NONNULL(bignumToArray(KJ_REQUIRE_NONNULL(RSA_get0_dmp1(rsa)))));
+    jwk.dq = fastEncodeBase64Url(
+        KJ_REQUIRE_NONNULL(bignumToArray(KJ_REQUIRE_NONNULL(RSA_get0_dmq1(rsa)))));
+    jwk.qi = fastEncodeBase64Url(
+        KJ_REQUIRE_NONNULL(bignumToArray(KJ_REQUIRE_NONNULL(RSA_get0_iqmp(rsa)))));
   }
 
   return jwk;

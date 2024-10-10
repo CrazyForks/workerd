@@ -2,8 +2,8 @@ load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 load("//:build/kj_test.bzl", "kj_test")
+load("//:build/wd_capnp_library.bzl", "wd_capnp_library")
 load("//:build/wd_cc_binary.bzl", "wd_cc_binary")
-load("//:build/wd_cc_capnp_library.bzl", "wd_cc_capnp_library")
 load("//:build/wd_cc_library.bzl", "wd_cc_library")
 
 config_setting(
@@ -49,6 +49,7 @@ wd_cc_binary(
     visibility = ["//visibility:public"],
     deps = [
         ":server",
+        ":v8-platform-impl",
         ":workerd-meta_capnp",
         ":workerd_capnp",
         "//src/pyodide:pyodide_extra_capnp",
@@ -100,12 +101,10 @@ wd_cc_library(
     name = "server",
     srcs = [
         "server.c++",
-        "v8-platform-impl.c++",
         "workerd-api.c++",
     ],
     hdrs = [
         "server.h",
-        "v8-platform-impl.h",
         "workerd-api.h",
     ],
     defines = select({
@@ -117,7 +116,9 @@ wd_cc_library(
         ":actor-id-impl",
         ":alarm-scheduler",
         ":workerd_capnp",
+        "//deps/rust:runtime",
         "//src/workerd/api:html-rewriter",
+        "//src/workerd/api:hyperdrive",
         "//src/workerd/api:pyodide",
         "//src/workerd/api:rtti",
         "//src/workerd/api/node",
@@ -129,20 +130,25 @@ wd_cc_library(
     ],
 )
 
-wd_cc_capnp_library(
-    name = "workerd_capnp",
-    srcs = ["workerd.capnp"],
-    visibility = ["//visibility:public"],
-    deps = [],
+wd_cc_library(
+    name = "v8-platform-impl",
+    srcs = [
+        "v8-platform-impl.c++",
+    ],
+    hdrs = [
+        "v8-platform-impl.h",
+    ],
+    deps = [
+        "//src/workerd/jsg",
+        "@capnp-cpp//src/kj",
+    ],
 )
 
-wd_cc_capnp_library(
-    name = "workerd-meta_capnp",
-    srcs = ["workerd-meta.capnp"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":workerd_capnp",
-    ],
+wd_capnp_library(src = "workerd.capnp")
+
+wd_capnp_library(
+    src = "workerd-meta.capnp",
+    deps = [":workerd_capnp"],
 )
 
 kj_test(

@@ -3,13 +3,16 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "sqlite.h"
-#include <cstdint>
+
+#include <fcntl.h>
+
 #include <kj/test.h>
 #include <kj/thread.h>
-#include <cstdlib>
-#include <cerrno>
-#include <fcntl.h>
+
 #include <atomic>
+#include <cerrno>
+#include <cstdint>
+#include <cstdlib>
 
 #if _WIN32
 #include <io.h>
@@ -509,7 +512,9 @@ KJ_TEST("SQLite read row counters (basic)") {
   constexpr int dbRowCount = 1000;
   auto insertStmt = db.prepare("INSERT INTO things (id, unindexed_int, value) VALUES (?, ?, ?)");
   for (int i = 0; i < dbRowCount; i++) {
-    insertStmt.run(i, i * 1000, kj::str("value", i));
+    auto query = insertStmt.run(i, i * 1000, kj::str("value", i));
+    KJ_EXPECT(query.getRowsRead() == 1);
+    KJ_EXPECT(query.getRowsWritten() == 1);
   }
 
   // Sanity check that the inserts worked.
@@ -663,6 +668,40 @@ KJ_TEST("SQLite write row counters (basic)") {
   }
 }
 
+KJ_TEST("SQLite read/write row counters (large row insert)") {
+  // This is used to verify reading/writing a large row (bigger than the size of one page in sqlite)
+  // results only in 1 read/row count as returned by the DB
+
+  auto dir = kj::newInMemoryDirectory(kj::nullClock());
+  SqliteDatabase::Vfs vfs(*dir);
+  SqliteDatabase db(vfs, kj::Path({"foo"}), kj::WriteMode::CREATE | kj::WriteMode::MODIFY);
+
+  db.run("CREATE TABLE large_things (id INTEGER PRIMARY KEY, large_value TEXT)");
+
+  // SQLite's default page size is 4096 bytes
+  // So create a string significantly larger than that
+  KJ_EXPECT(db.run("PRAGMA page_size").getInt(0) == 4096);
+  kj::String largeValue = kj::str(kj::repeat('A', 100000));
+
+  // Insert the large row
+  RowCounts insertStats = countRowsTouched(
+      db, "INSERT INTO large_things (id, large_value) VALUES (?, ?)", 1, kj::mv(largeValue));
+
+  KJ_EXPECT(insertStats.found == 0);
+  KJ_EXPECT(insertStats.read == 1);
+  KJ_EXPECT(insertStats.written == 1);
+
+  // Verify the insert
+  auto verifyStmt = db.prepare("SELECT COUNT(*) FROM large_things");
+  KJ_EXPECT(verifyStmt.run().getInt(0) == 1);
+
+  // Read the large row
+  RowCounts readStats = countRowsTouched(db, "SELECT * FROM large_things WHERE id = ?", 1);
+  KJ_EXPECT(readStats.found == 1);
+  KJ_EXPECT(readStats.read == 1);
+  KJ_EXPECT(readStats.written == 0);
+}
+
 KJ_TEST("SQLite row counters with triggers") {
   auto dir = kj::newInMemoryDirectory(kj::nullClock());
   SqliteDatabase::Vfs vfs(*dir);
@@ -738,6 +777,303 @@ KJ_TEST("DELETE with LIMIT") {
   db.run(R"(DELETE FROM things LIMIT 2)");
   auto q = db.run(R"(SELECT COUNT(*) FROM things;)");
   KJ_EXPECT(q.getInt(0) == 3);
+}
+
+KJ_TEST("reset database") {
+  auto dir = kj::newInMemoryDirectory(kj::nullClock());
+  SqliteDatabase::Vfs vfs(*dir);
+  SqliteDatabase db(vfs, kj::Path({"foo"}), kj::WriteMode::CREATE | kj::WriteMode::MODIFY);
+
+  db.run("PRAGMA journal_mode=WAL;");
+
+  db.run("CREATE TABLE things (id INTEGER PRIMARY KEY)");
+
+  db.run("INSERT INTO things VALUES (123)");
+  db.run("INSERT INTO things VALUES (321)");
+
+  auto stmt = db.prepare("SELECT * FROM things");
+
+  auto query = stmt.run();
+  KJ_ASSERT(!query.isDone());
+  KJ_EXPECT(query.getInt(0) == 123);
+
+  db.reset();
+  db.run("PRAGMA journal_mode=WAL;");
+
+  // The query was canceled.
+  KJ_EXPECT_THROW_MESSAGE("query canceled because reset()", query.nextRow());
+  KJ_EXPECT_THROW_MESSAGE("query canceled because reset()", query.getInt(0));
+
+  // The statement doesn't work because the table is gone.
+  KJ_EXPECT_THROW_MESSAGE("no such table: things: SQLITE_ERROR", stmt.run());
+
+  // But we can recreate it.
+  db.run("CREATE TABLE things (id INTEGER PRIMARY KEY)");
+  db.run("INSERT INTO things VALUES (456)");
+
+  // Now the statement works.
+  {
+    auto q2 = stmt.run();
+    KJ_ASSERT(!q2.isDone());
+    KJ_EXPECT(q2.getInt(0) == 456);
+    q2.nextRow();
+    KJ_EXPECT(q2.isDone());
+  }
+}
+
+KJ_TEST("SQLite observer addQueryStats") {
+  class TestSqliteObserver: public SqliteObserver {
+  public:
+    void addQueryStats(uint64_t read, uint64_t written) override {
+      rowsRead += read;
+      rowsWritten += written;
+    }
+
+    uint64_t rowsRead = 0;
+    uint64_t rowsWritten = 0;
+  };
+
+  TempDirOnDisk dir;
+  SqliteDatabase::Vfs vfs(*dir);
+  TestSqliteObserver sqliteObserver = TestSqliteObserver();
+  SqliteDatabase db(
+      vfs, kj::Path({"foo"}), kj::WriteMode::CREATE | kj::WriteMode::MODIFY, sqliteObserver);
+
+  db.run(R"(
+    CREATE TABLE things (
+      id INTEGER PRIMARY KEY
+    );
+  )");
+
+  // There are some rows read and written when we create the db, we offset this in the test
+  int rowsReadBefore = sqliteObserver.rowsRead;
+  int rowsWrittenBefore = sqliteObserver.rowsWritten;
+  constexpr int dbRowCount = 3;
+  {
+    db.run("INSERT INTO things (id) VALUES (10)");
+    db.run("INSERT INTO things (id) VALUES (11)");
+    db.run("INSERT INTO things (id) VALUES (12)");
+  }
+  KJ_EXPECT(sqliteObserver.rowsRead - rowsReadBefore == dbRowCount);
+  KJ_EXPECT(sqliteObserver.rowsWritten - rowsWrittenBefore == dbRowCount);
+
+  rowsReadBefore = sqliteObserver.rowsRead;
+  rowsWrittenBefore = sqliteObserver.rowsWritten;
+  {
+    auto getCount = db.prepare("SELECT COUNT(*) FROM things");
+    KJ_EXPECT(getCount.run().getInt(0) == dbRowCount);
+  }
+  KJ_EXPECT(sqliteObserver.rowsRead - rowsReadBefore == dbRowCount);
+  KJ_EXPECT(sqliteObserver.rowsWritten - rowsWrittenBefore == 0);
+
+  // Verify if addQueryStats works correctly when we call query.nextRow()
+  rowsReadBefore = sqliteObserver.rowsRead;
+  rowsWrittenBefore = sqliteObserver.rowsWritten;
+  {
+    auto stmt = db.prepare("SELECT * FROM things");
+    auto query = stmt.run();
+    KJ_ASSERT(!query.isDone());
+    while (!query.isDone()) {
+      query.nextRow();
+    }
+  }
+  KJ_EXPECT(sqliteObserver.rowsRead - rowsReadBefore == dbRowCount);
+  KJ_EXPECT(sqliteObserver.rowsWritten - rowsWrittenBefore == 0);
+
+  // Verify addQueryStats works correctly when db is reset
+  rowsReadBefore = sqliteObserver.rowsRead;
+  rowsWrittenBefore = sqliteObserver.rowsWritten;
+  {
+    auto query = db.run("INSERT INTO things (id) VALUES (100)");
+    db.reset();
+  }
+  KJ_EXPECT(sqliteObserver.rowsRead - rowsReadBefore == 1);
+  KJ_EXPECT(sqliteObserver.rowsWritten - rowsWrittenBefore == 1);
+}
+
+KJ_TEST("SQLite failed statement reset") {
+  auto dir = kj::newInMemoryDirectory(kj::nullClock());
+  SqliteDatabase::Vfs vfs(*dir);
+  SqliteDatabase db(vfs, kj::Path({"foo"}), kj::WriteMode::CREATE | kj::WriteMode::MODIFY);
+
+  db.run(R"(
+    CREATE TABLE things (
+      id INTEGER PRIMARY KEY
+    );
+  )");
+
+  auto stmt = db.prepare("INSERT INTO things VALUES (?)");
+
+  // Run the statement a couple times.
+  stmt.run(1);
+  stmt.run(2);
+
+  // Now run it with a duplicate value, should fail.
+  KJ_EXPECT_THROW_MESSAGE("UNIQUE constraint failed: things.id", stmt.run(1));
+
+  // The statement shouldn't be left broken. Run it again with a non-duplicate.
+  stmt.run(3);
+
+  // Same as above but with ValuePtrs, since these use a different path.
+  using ValuePtr = SqliteDatabase::Query::ValuePtr;
+  ValuePtr value = int64_t(1);
+  KJ_EXPECT_THROW_MESSAGE(
+      "UNIQUE constraint failed: things.id", stmt.run(kj::arrayPtr<const ValuePtr>(value)));
+  value = int64_t(4);
+  stmt.run(kj::arrayPtr<const ValuePtr>(value));
+
+  // Sanity check that those queries were doing something.
+  KJ_EXPECT(db.run("SELECT COUNT(*) FROM things").getInt(0) == 4);
+}
+
+class MockRollbackCallback {
+public:
+  kj::Function<void()> create() {
+    KJ_ASSERT(!created);
+    created = true;
+    return [this, destructor = kj::defer([this]() { destroyed = true; })]() {
+      KJ_ASSERT(!called, "callback called multiple times?");
+      called = true;
+    };
+  }
+
+  bool isStillLive() {
+    return !destroyed && !called;
+  }
+  bool wasRolledBack() {
+    return called && destroyed;
+  }
+  bool wasCommitted() {
+    return !called && destroyed;
+  }
+
+private:
+  bool created = false;
+  bool called = false;
+  bool destroyed = false;
+};
+
+KJ_TEST("SQLite onRollback") {
+  auto dir = kj::newInMemoryDirectory(kj::nullClock());
+  SqliteDatabase::Vfs vfs(*dir);
+  SqliteDatabase db(vfs, kj::Path({"foo"}), kj::WriteMode::CREATE | kj::WriteMode::MODIFY);
+
+  // With no transactions open, the callback is dropped immediately.
+  {
+    MockRollbackCallback cb;
+    db.onRollback(cb.create());
+    KJ_EXPECT(cb.wasCommitted());
+  }
+
+  // Committed transactions drop the callback without invoking it.
+  {
+    db.run("BEGIN TRANSACTION");
+
+    MockRollbackCallback cb;
+    db.onRollback(cb.create());
+    KJ_EXPECT(cb.isStillLive());
+
+    db.run("COMMIT TRANSACTION");
+
+    KJ_EXPECT(cb.wasCommitted());
+  }
+
+  {
+    db.run("SAVEPOINT foo");
+
+    MockRollbackCallback cb;
+    db.onRollback(cb.create());
+    KJ_EXPECT(cb.isStillLive());
+
+    db.run("RELEASE SAVEPOINT foo");
+
+    KJ_EXPECT(cb.wasCommitted());
+  }
+
+  // Rollbacks invoke the callback.
+  {
+    db.run("BEGIN TRANSACTION");
+
+    MockRollbackCallback cb;
+    db.onRollback(cb.create());
+    KJ_EXPECT(cb.isStillLive());
+
+    db.run("ROLLBACK TRANSACTION");
+
+    KJ_EXPECT(cb.wasRolledBack());
+  }
+
+  {
+    db.run("SAVEPOINT foo");
+
+    MockRollbackCallback cb;
+    db.onRollback(cb.create());
+    KJ_EXPECT(cb.isStillLive());
+
+    db.run("ROLLBACK TO SAVEPOINT foo");
+    KJ_EXPECT(cb.wasRolledBack());
+
+    // The savepoint still exists until we release it...
+    db.run("RELEASE SAVEPOINT foo");
+  }
+
+  // Prepared statements work.
+  {
+    auto begin = db.prepare("BEGIN TRANSACTION");
+    auto commit = db.prepare("COMMIT TRANSACTION");
+
+    // No transactions are open yet (we only prepared some statements, we didn't execute them), so
+    // the callback is dropped immediately.
+    MockRollbackCallback cb1;
+    db.onRollback(cb1.create());
+    KJ_EXPECT(cb1.wasCommitted());
+
+    begin.run();
+
+    // Now a transaction is actually open.
+    MockRollbackCallback cb2;
+    db.onRollback(cb2.create());
+    KJ_EXPECT(cb2.isStillLive());
+
+    commit.run();
+
+    KJ_EXPECT(cb2.wasCommitted());
+  }
+
+  // Make a whole stack, do partial rollbacks...
+  {
+    db.run("BEGIN TRANSACTION");
+
+    MockRollbackCallback cb1;
+    db.onRollback(cb1.create());
+
+    db.run("SAVEPOINT foo");
+    db.run("SAVEPOINT bar");
+
+    MockRollbackCallback cb2;
+    db.onRollback(cb2.create());
+
+    db.run("RELEASE bar");
+
+    KJ_EXPECT(cb1.isStillLive());
+    KJ_EXPECT(cb2.isStillLive());
+
+    db.run("SAVEPOINT baz");
+    db.run("ROLLBACK TO baz");
+
+    KJ_EXPECT(cb1.isStillLive());
+    KJ_EXPECT(cb2.isStillLive());
+
+    db.run("SAVEPOINT qux");
+    db.run("ROLLBACK TO foo");
+
+    KJ_EXPECT(cb1.isStillLive());
+    KJ_EXPECT(cb2.wasRolledBack());
+
+    db.run("COMMIT TRANSACTION");
+
+    KJ_EXPECT(cb1.wasCommitted());
+  }
 }
 
 }  // namespace

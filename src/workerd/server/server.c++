@@ -3,39 +3,44 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "server.h"
-#include <kj/debug.h>
-#include <kj/glob-filter.h>
+
+#include "workerd-api.h"
+
+#include <workerd/api/actor-state.h>
+#include <workerd/api/analytics-engine.capnp.h>
+#include <workerd/api/pyodide/pyodide.h>
+#include <workerd/api/worker-rpc.h>
+#include <workerd/io/actor-cache.h>
+#include <workerd/io/actor-id.h>
+#include <workerd/io/actor-sqlite.h>
+#include <workerd/io/compatibility-date.h>
+#include <workerd/io/hibernation-manager.h>
+#include <workerd/io/io-context.h>
+#include <workerd/io/request-tracker.h>
+#include <workerd/io/worker-entrypoint.h>
+#include <workerd/io/worker-interface.h>
+#include <workerd/io/worker.h>
+#include <workerd/util/http-util.h>
+#include <workerd/util/mimetype.h>
+#include <workerd/util/use-perfetto-categories.h>
+#include <workerd/util/uuid.h>
+
+#include <openssl/bio.h>
+#include <openssl/pem.h>
+
+#include <capnp/compat/json.h>
+#include <capnp/message.h>
+#include <capnp/rpc-twoparty.h>
 #include <kj/compat/http.h>
 #include <kj/compat/tls.h>
 #include <kj/compat/url.h>
+#include <kj/debug.h>
 #include <kj/encoding.h>
+#include <kj/glob-filter.h>
 #include <kj/map.h>
-#include <capnp/message.h>
-#include <capnp/rpc-twoparty.h>
-#include <capnp/compat/json.h>
-#include <workerd/api/analytics-engine.capnp.h>
-#include <workerd/io/actor-id.h>
-#include <workerd/io/worker-interface.h>
-#include <workerd/io/worker-entrypoint.h>
-#include <workerd/io/compatibility-date.h>
-#include <workerd/io/io-context.h>
-#include <workerd/io/worker.h>
-#include <ctime>
-#include <openssl/bio.h>
-#include <openssl/pem.h>
-#include <workerd/io/actor-cache.h>
-#include <workerd/io/actor-sqlite.h>
-#include <workerd/io/request-tracker.h>
-#include <workerd/util/http-util.h>
-#include <workerd/api/actor-state.h>
-#include <workerd/util/mimetype.h>
-#include <workerd/util/uuid.h>
-#include <workerd/util/use-perfetto-categories.h>
-#include <workerd/api/worker-rpc.h>
-#include "workerd-api.h"
-#include <workerd/api/pyodide/pyodide.h>
-#include <workerd/io/hibernation-manager.h>
+
 #include <cstdlib>
+#include <ctime>
 
 namespace workerd::server {
 
@@ -159,7 +164,7 @@ Server::Server(kj::Filesystem& fs,
       entropySource(entropySource),
       reportConfigError(kj::mv(reportConfigError)),
       consoleMode(consoleMode),
-      memoryCacheProvider(kj::heap<api::MemoryCacheProvider>()),
+      memoryCacheProvider(kj::heap<api::MemoryCacheProvider>(timer)),
       tasks(*this) {}
 
 Server::~Server() noexcept(false) {}
@@ -978,8 +983,7 @@ private:
                   KJ_ASSERT(ranges.size() > 0);
                   if (ranges.size() == 1) range = ranges[0];
                 }
-                KJ_CASE_ONEOF(_, kj::HttpEverythingRange) {
-                }
+                KJ_CASE_ONEOF(_, kj::HttpEverythingRange) {}
                 KJ_CASE_ONEOF(_, kj::HttpUnsatisfiableRange) {
                   kj::HttpHeaders headers(headerTable);
                   headers.set(kj::HttpHeaderId::CONTENT_RANGE, kj::str("bytes */", meta.size));
@@ -1863,11 +1867,7 @@ public:
           : alarmScheduler(alarmScheduler),
             actor(actor) {}
 
-      kj::Promise<kj::Maybe<kj::Date>> getAlarm() override {
-        return alarmScheduler.getAlarm(actor);
-      }
-
-      kj::Promise<void> setAlarm(kj::Maybe<kj::Date> newAlarmTime) override {
+      kj::Promise<void> scheduleRun(kj::Maybe<kj::Date> newAlarmTime) override {
         KJ_IF_SOME(scheduledTime, newAlarmTime) {
           alarmScheduler.setAlarm(actor, scheduledTime);
         } else {
@@ -1875,17 +1875,6 @@ public:
         }
         return kj::READY_NOW;
       }
-
-      // No-op -- armAlarmHandler() is normally used to schedule a delete after the alarm runs.
-      // But since alarm read/write operations happen on the same thread as the scheduler in
-      // workerd, we can just handle the delete in the scheduler instead.
-      kj::Maybe<kj::Own<void>> armAlarmHandler(kj::Date, bool) override {
-        // We return this weird kj::Own<void> to `this` since just doing kj::Own<void>() creates an
-        // empty maybe.
-        return kj::Own<void>(this, kj::NullDisposer::instance);
-      }
-
-      void cancelDeferredAlarmDeletion() override {}
 
     private:
       AlarmScheduler& alarmScheduler;
@@ -1924,7 +1913,7 @@ public:
           auto& channels = KJ_ASSERT_NONNULL(service.ioChannels.tryGet<LinkedIoChannels>());
 
           auto makeActorCache = [&](const ActorCache::SharedLru& sharedLru, OutputGate& outputGate,
-                                    ActorCache::Hooks& hooks) {
+                                    ActorCache::Hooks& hooks, SqliteObserver& sqliteObserver) {
             return config.tryGet<Durable>().map(
                 [&](const Durable& d) -> kj::Own<ActorCacheInterface> {
               KJ_IF_SOME(as, channels.actorStorage) {
@@ -1941,8 +1930,11 @@ public:
                     kj::Path({d.uniqueKey, kj::str(idPtr, ".sqlite")}),
                     kj::WriteMode::CREATE | kj::WriteMode::MODIFY | kj::WriteMode::CREATE_PARENT);
 
-                // Before we do anything, make sure the database is in WAL mode.
-                db->run("PRAGMA journal_mode=WAL;");
+                // Before we do anything, make sure the database is in WAL mode. We also need to
+                // do this after reset() is used, so register a callback for that.
+                auto setWalMode = [](SqliteDatabase& db) { db.run("PRAGMA journal_mode=WAL;"); };
+                setWalMode(*db);
+                db->afterReset(kj::mv(setWalMode));
 
                 return kj::heap<ActorSqlite>(kj::mv(db), outputGate,
                     []() -> kj::Promise<void> { return kj::READY_NOW; }, *sqliteHooks)
@@ -1956,11 +1948,21 @@ public:
             });
           };
 
+          bool enableSql = true;
+          KJ_SWITCH_ONEOF(config) {
+            KJ_CASE_ONEOF(c, Durable) {
+              enableSql = c.enableSql;
+            }
+            KJ_CASE_ONEOF(c, Ephemeral) {
+              enableSql = c.enableSql;
+            }
+          }
+
           auto makeStorage =
-              [](jsg::Lock& js, const Worker::Api& api,
+              [enableSql = enableSql](jsg::Lock& js, const Worker::Api& api,
                   ActorCacheInterface& actorCache) -> jsg::Ref<api::DurableObjectStorage> {
             return jsg::alloc<api::DurableObjectStorage>(
-                IoContext::current().addObject(actorCache));
+                IoContext::current().addObject(actorCache), enableSql);
           };
 
           TimerChannel& timerChannel = service;
@@ -2125,7 +2127,8 @@ private:
         kj::Maybe<kj::String> cacheName,
         kj::Maybe<kj::String> cfBlobJson,
         SpanParent parentSpan)
-        : client(asHttpClient(parent.startRequest({kj::mv(cfBlobJson), kj::mv(parentSpan)}))),
+        : client(asHttpClient(parent.startRequest(
+              {kj::mv(cfBlobJson), TraceParentContext(kj::mv(parentSpan), nullptr)}))),
           cacheName(kj::mv(cacheName)),
           cacheNamespaceHeader(cacheNamespaceHeader) {}
 
@@ -2205,9 +2208,11 @@ private:
       const ActorIdFactory::ActorId& id,
       kj::Maybe<kj::String> locationHint,
       ActorGetMode mode,
+      bool enableReplicaRouting,
       SpanParent parentSpan) override {
     JSG_REQUIRE(mode == ActorGetMode::GET_OR_CREATE, Error,
         "workerd only supports GET_OR_CREATE mode for getting actor stubs");
+    JSG_REQUIRE(!enableReplicaRouting, Error, "workerd does not support replica routing.");
     auto& channels =
         KJ_REQUIRE_NONNULL(ioChannels.tryGet<LinkedIoChannels>(), "link() has not been called");
 
@@ -3558,7 +3563,8 @@ void Server::startServices(jsg::V8System& v8System,
             hadDurable = true;
             serviceActorConfigs.insert(kj::str(ns.getClassName()),
                 Durable{.uniqueKey = kj::str(ns.getUniqueKey()),
-                  .isEvictable = !ns.getPreventEviction()});
+                  .isEvictable = !ns.getPreventEviction(),
+                  .enableSql = ns.getEnableSql()});
             continue;
           case config::Worker::DurableObjectNamespace::EPHEMERAL_LOCAL:
             if (!experimental) {
@@ -3567,8 +3573,8 @@ void Server::startServices(jsg::V8System& v8System,
                   "experimental feature which may change or go away in the future. You must run "
                   "workerd with `--experimental` to use this feature."));
             }
-            serviceActorConfigs.insert(
-                kj::str(ns.getClassName()), Ephemeral{.isEvictable = !ns.getPreventEviction()});
+            serviceActorConfigs.insert(kj::str(ns.getClassName()),
+                Ephemeral{.isEvictable = !ns.getPreventEviction(), .enableSql = ns.getEnableSql()});
             continue;
         }
         reportConfigError(kj::str("Encountered unknown DurableObjectNamespace type in service \"",

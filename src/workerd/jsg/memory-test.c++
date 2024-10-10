@@ -4,7 +4,9 @@
 
 #include <workerd/jsg/memory.h>
 #include <workerd/jsg/setup.h>
+
 #include <v8-profiler.h>
+
 #include <kj/map.h>
 #include <kj/test.h>
 

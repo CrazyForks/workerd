@@ -3,9 +3,10 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "sockets.h"
-#include "system-streams.h"
-#include <workerd/io/worker-interface.h>
 
+#include "system-streams.h"
+
+#include <workerd/io/worker-interface.h>
 #include <workerd/jsg/url.h>
 
 namespace workerd::api {
@@ -460,4 +461,8 @@ jsg::Promise<void> Socket::maybeCloseWriteSide(jsg::Lock& js) {
       }));
 }
 
+jsg::Ref<Socket> SocketsModule::connect(
+    jsg::Lock& js, AnySocketAddress address, jsg::Optional<SocketOptions> options) {
+  return connectImpl(js, kj::none, kj::mv(address), kj::mv(options));
+}
 }  // namespace workerd::api

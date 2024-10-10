@@ -3,15 +3,17 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "actor-cache.h"
-#include <kj/test.h>
-#include <kj/debug.h>
-#include <capnp/dynamic.h>
-#include <kj/list.h>
 #include "io-gate.h"
-#include <kj/thread.h>
-#include <kj/source-location.h>
+
 #include <workerd/util/capnp-mock.h>
 #include <workerd/util/test.h>
+
+#include <capnp/dynamic.h>
+#include <kj/debug.h>
+#include <kj/list.h>
+#include <kj/source-location.h>
+#include <kj/test.h>
+#include <kj/thread.h>
 
 namespace workerd {
 namespace {
@@ -4975,8 +4977,14 @@ KJ_TEST("ActorCache alarm get/put") {
     KJ_ASSERT(time == kj::none);
   }
 
-  // we have a cached time == nullptr, so we should not attempt to run an alarm
-  KJ_ASSERT(test.cache.armAlarmHandler(10 * kj::SECONDS + kj::UNIX_EPOCH, false) == kj::none);
+  {
+    // we have a cached time == nullptr, so we should not attempt to run an alarm
+    auto armResult = test.cache.armAlarmHandler(10 * kj::SECONDS + kj::UNIX_EPOCH, false);
+    KJ_ASSERT(armResult.is<ActorCache::CancelAlarmHandler>());
+    auto cancelResult = kj::mv(armResult.get<ActorCache::CancelAlarmHandler>());
+    KJ_ASSERT(cancelResult.waitBeforeCancel.poll(ws));
+    cancelResult.waitBeforeCancel.wait(ws);
+  }
 
   {
     test.setAlarm(oneMs);
@@ -4988,7 +4996,10 @@ KJ_TEST("ActorCache alarm get/put") {
 
   {
     // Test that alarm handler handle clears alarm when dropped with no writes
-    { auto maybeWrite = KJ_ASSERT_NONNULL(test.cache.armAlarmHandler(oneMs, false)); }
+    {
+      auto armResult = test.cache.armAlarmHandler(oneMs, false);
+      KJ_ASSERT(armResult.is<ActorCache::RunAlarmHandler>());
+    }
     mockStorage->expectCall("deleteAlarm", ws)
         .withParams(CAPNP(timeToDeleteMs = 1))
         .thenReturn(CAPNP(deleted = true));
@@ -4999,7 +5010,8 @@ KJ_TEST("ActorCache alarm get/put") {
 
     // Test that alarm handler handle does not clear alarm when dropped with writes
     {
-      auto maybeWrite = KJ_ASSERT_NONNULL(test.cache.armAlarmHandler(oneMs, false));
+      auto armResult = test.cache.armAlarmHandler(oneMs, false);
+      KJ_ASSERT(armResult.is<ActorCache::RunAlarmHandler>());
       test.setAlarm(twoMs);
     }
     mockStorage->expectCall("setAlarm", ws)
@@ -5011,7 +5023,10 @@ KJ_TEST("ActorCache alarm get/put") {
     test.setAlarm(oneMs);
 
     // Test that alarm handler handle does not cache delete when it fails
-    { auto maybeWrite = KJ_ASSERT_NONNULL(test.cache.armAlarmHandler(oneMs, false)); }
+    {
+      auto armResult = test.cache.armAlarmHandler(oneMs, false);
+      KJ_ASSERT(armResult.is<ActorCache::RunAlarmHandler>());
+    }
     mockStorage->expectCall("deleteAlarm", ws)
         .withParams(CAPNP(timeToDeleteMs = 1))
         .thenReturn(CAPNP(deleted = false));
@@ -5020,7 +5035,10 @@ KJ_TEST("ActorCache alarm get/put") {
 
   {
     // Test that alarm handler handle does not cache alarm delete when noCache == true
-    { auto maybeWrite = KJ_ASSERT_NONNULL(test.cache.armAlarmHandler(twoMs, true)); }
+    {
+      auto armResult = test.cache.armAlarmHandler(twoMs, true);
+      KJ_ASSERT(armResult.is<ActorCache::RunAlarmHandler>());
+    }
     mockStorage->expectCall("deleteAlarm", ws)
         .withParams(CAPNP(timeToDeleteMs = 2))
         .thenReturn(CAPNP(deleted = true));

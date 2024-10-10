@@ -2,21 +2,25 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
-#include "r2-multipart.h"
 #include "r2-bucket.h"
+
+#include "r2-multipart.h"
 #include "r2-rpc.h"
 #include "util.h"
+
+#include <workerd/api/http.h>
+#include <workerd/api/r2-api.capnp.h>
+#include <workerd/api/streams.h>
+#include <workerd/util/http-util.h>
+#include <workerd/util/mimetype.h>
+
+#include <capnp/compat/json.h>
+#include <capnp/message.h>
+#include <kj/compat/http.h>
+#include <kj/encoding.h>
+
 #include <array>
 #include <cmath>
-#include <workerd/api/http.h>
-#include <workerd/api/streams.h>
-#include <workerd/util/mimetype.h>
-#include <kj/encoding.h>
-#include <kj/compat/http.h>
-#include <capnp/message.h>
-#include <capnp/compat/json.h>
-#include <workerd/util/http-util.h>
-#include <workerd/api/r2-api.capnp.h>
 
 namespace workerd::api::public_beta {
 static bool isWholeNumber(double x) {
@@ -935,10 +939,17 @@ kj::Array<R2Bucket::Etag> parseConditionalEtagHeader(kj::StringPtr condHeader,
   }
 }
 
-kj::Array<R2Bucket::Etag> buildSingleStrongEtagArray(kj::StringPtr etagValue) {
-  struct R2Bucket::StrongEtag etag = {.value = kj::str(etagValue)};
+kj::Array<R2Bucket::Etag> buildSingleEtagArray(kj::StringPtr etagValue) {
   kj::ArrayBuilder<R2Bucket::Etag> etagArrayBuilder = kj::heapArrayBuilder<R2Bucket::Etag>(1);
-  etagArrayBuilder.add(kj::mv(etag));
+
+  if (etagValue == "*") {
+    struct R2Bucket::WildcardEtag etag = {};
+    etagArrayBuilder.add(kj::mv(etag));
+  } else {
+    struct R2Bucket::StrongEtag etag = {.value = kj::str(etagValue)};
+    etagArrayBuilder.add(kj::mv(etag));
+  }
+
   return etagArrayBuilder.finish();
 }
 
@@ -967,12 +978,12 @@ R2Bucket::UnwrappedConditional::UnwrappedConditional(const Conditional& c)
   KJ_IF_SOME(e, c.etagMatches) {
     JSG_REQUIRE(!isQuotedEtag(e.value), TypeError,
         "Conditional ETag should not be wrapped in quotes (", e.value, ").");
-    etagMatches = buildSingleStrongEtagArray(e.value);
+    etagMatches = buildSingleEtagArray(e.value);
   }
   KJ_IF_SOME(e, c.etagDoesNotMatch) {
     JSG_REQUIRE(!isQuotedEtag(e.value), TypeError,
         "Conditional ETag should not be wrapped in quotes (", e.value, ").");
-    etagDoesNotMatch = buildSingleStrongEtagArray(e.value);
+    etagDoesNotMatch = buildSingleEtagArray(e.value);
   }
   KJ_IF_SOME(d, c.uploadedAfter) {
     uploadedAfter = d;

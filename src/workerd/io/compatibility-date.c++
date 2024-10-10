@@ -2,14 +2,17 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
-#include <cstdio>
 #include "compatibility-date.h"
+
 #include "time.h"
-#include <capnp/schema.h>
+
 #include <capnp/dynamic.h>
+#include <capnp/schema.h>
 #include <kj/debug.h>
 #include <kj/map.h>
 #include <kj/vector.h>
+
+#include <cstdio>
 
 namespace workerd {
 
@@ -124,6 +127,7 @@ void compileCompatibilityFlags(kj::StringPtr compatDate,
   }
 
   kj::HashSet<kj::String> flagSet;
+  flagSet.reserve(compatFlags.size());
   for (auto flag: compatFlags) {
     flagSet.upsert(kj::str(flag), [&](auto& existing, auto&& newValue) {
       errorReporter.addError(kj::str("Compatibility flag specified multiple times: ", flag));
@@ -150,7 +154,7 @@ void compileCompatibilityFlags(kj::StringPtr compatDate,
     kj::Maybe<CompatDate> enableDate;
     kj::StringPtr enableFlagName;
     kj::StringPtr disableFlagName;
-    kj::Maybe<ImpliedBy> maybeImpliedBy;
+    kj::Vector<ImpliedBy> impliedByVector;
 
     for (auto annotation: field.getProto().getAnnotations()) {
       if (annotation.getId() == COMPAT_ENABLE_FLAG_ANNOTATION_ID) {
@@ -174,22 +178,29 @@ void compileCompatibilityFlags(kj::StringPtr compatDate,
       } else if (annotation.getId() == EXPERIMENTAl_ANNOTATION_ID) {
         isExperimental = true;
       } else if (annotation.getId() == IMPLIED_BY_AFTER_DATE_ANNOTATION_ID) {
-        if (maybeImpliedBy == kj::none) {
-          auto value = annotation.getValue();
-          auto s = value.getStruct().getAs<workerd::ImpliedByAfterDate>();
-          auto parsedDate = KJ_ASSERT_NONNULL(CompatDate::parse(s.getDate()));
-          // This flag will be marked as enabled if the flag identified by
-          // s.getName() is enabled, but only on or after the specified date.
-          if (parsedCompatDate >= parsedDate && !disableByFlag) {
-            maybeImpliedBy.emplace(ImpliedBy{
+        auto value = annotation.getValue();
+        auto s = value.getStruct().getAs<workerd::ImpliedByAfterDate>();
+        auto parsedDate = KJ_ASSERT_NONNULL(CompatDate::parse(s.getDate()));
+        // This flag will be marked as enabled if the flag identified by
+        // s.getName() is enabled, but only on or after the specified date.
+        if (parsedCompatDate >= parsedDate && !disableByFlag) {
+          if (s.hasName()) {
+            impliedByVector.add(ImpliedBy{
               .field = field,
               .other = schema.getFieldByName(s.getName()),
             });
+          } else if (s.hasNames()) {
+            for (auto name: s.getNames()) {
+              impliedByVector.add(ImpliedBy{
+                .field = field,
+                .other = schema.getFieldByName(name),
+              });
+            }
           }
         }
       }
     }
-    KJ_IF_SOME(impliedBy, maybeImpliedBy) {
+    for (auto& impliedBy: impliedByVector) {
       // We only want to add the implied by flag if it is not explicitly disabled.
       if (!disableByFlag) {
         impliedByList.add(kj::mv(impliedBy));
@@ -281,7 +292,7 @@ kj::Array<kj::StringPtr> decompileCompatibilityFlagsForFl(CompatibilityFlags::Re
       makeFieldTable(capnp::Schema::from<CompatibilityFlags>().getFields());
 
   kj::Vector<kj::StringPtr> enableFlags;
-
+  enableFlags.reserve(fieldTable.size());
   for (auto field: fieldTable) {
     if (capnp::toDynamic(input).get(field.field).as<bool>()) {
       enableFlags.add(field.enableFlag);

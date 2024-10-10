@@ -36,14 +36,14 @@ To update the version of V8 used by workerd, the steps are:
    ```
 
 6. Rebase the workerd V8 changes onto the new version of V8. For example, assuming
-   we are updating to 11.4.183.8 and there are 8 workerd patches for V8, the
+   we are updating to 11.4.183.8 and there are 19 workerd patches for V8, the
    command would be:
 
    ```sh
-   git rebase --onto 11.4.183.8 HEAD~8
+   git rebase --onto 11.4.183.8 HEAD~19
    ```
 
-   Note that `HEAD~8`, here and elsewhere, could be replaced with
+   Note that `HEAD~19`, here and elsewhere, could be replaced with
    `$(git describe --tags --abbrev=0)`, which prints the name of the tag on which the
    branch is based.
 
@@ -52,11 +52,11 @@ To update the version of V8 used by workerd, the steps are:
    Ideally at this stage, you should be able to build and test the local V8 with the
    patches applied. See the V8 [Testing](https://v8.dev/docs/test) page.
 
-7. Re-generate workerd's V8 patches. Assuming there are 8 workerd patches for V8,
+7. Re-generate workerd's V8 patches. Assuming there are 19 workerd patches for V8,
    the command would be:
 
    ```sh
-   git format-patch --full-index -k --no-signature --no-stat HEAD~8
+   git format-patch --full-index -k --no-signature --no-stat HEAD~19
    ```
 
 8. Remove the existing patches from `workerd/patches/v8` and copy over the latest generated patches
@@ -72,7 +72,8 @@ from the V8 directory.
 
     The `integrity` check needs to be updated to the new value. You can get the new value in
     bazel's preferred format just by looking into the mismatch error while trying to compile
-    workerd using the newer V8 version.
+    workerd using the newer V8 version or by running
+    `openssl dgst -sha256 -binary <tarball_filename> | openssl base64 -A`
 
     See [V8 http_archive in WORKSPACE](https://github.com/cloudflare/workerd/blob/587ad90dd1e91d2660c271018056f4189fca3501/WORKSPACE#L408)
 
@@ -81,7 +82,7 @@ from the V8 directory.
     You can find the commit versions for V8's dependencies under `v8/DEPS` and the ones
     that are carried through to workerd in the `workerd/WORKSPACE` file.
 
-    These currently include `abseil` and `com_googlesource_chromium_icu`.
+    These currently include `zlib` and `com_googlesource_chromium_icu`.
     Typically you'll get a build failure if the projects are out of sync. Copy the
     commit versions from `v8/DEPS` to the `WORKSPACE` file.
 

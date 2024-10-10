@@ -7,6 +7,7 @@
 
 import { default as internalTypes } from 'node-internal:internal_types';
 import { default as utilImpl } from 'node-internal:util';
+import { isDeepStrictEqual as _isDeepStrictEqual } from 'node-internal:internal_comparisons';
 
 import {
   validateFunction,
@@ -179,8 +180,7 @@ export const TextDecoder = globalThis.TextDecoder;
 export const TextEncoder = globalThis.TextEncoder;
 
 export function toUSVString(input: any) {
-  // TODO(cleanup): Apparently the typescript types for this aren't available yet?
-  return (`${input}` as any).toWellFormed();
+  return input.toWellFormed();
 }
 
 function pad(n: any): string {
@@ -231,8 +231,7 @@ export async function aborted(signal: AbortSignal, resource: object) {
     allowFunction: true,
   });
   if (signal.aborted) return Promise.resolve();
-  // TODO(cleanup): Apparently withResolvers isn't part of type defs we use yet
-  const { promise, resolve } = (Promise as any).withResolvers();
+  const { promise, resolve } = Promise.withResolvers();
   const opts = { __proto__: null, once: true };
   signal.addEventListener('abort', resolve, opts);
   return promise;
@@ -248,6 +247,18 @@ export function deprecate(
   // logs a warning to the console if the function is called. Do we want to support that?
   // For now, we're just going to silently return the input method unmodified.
   return fn;
+}
+
+export function getCallSite(frames: number = 10) {
+  return utilImpl.getCallSite(frames);
+}
+
+export function isDeepStrictEqual(a: unknown, b: unknown): boolean {
+  return _isDeepStrictEqual(a, b);
+}
+
+export function isArray(a: unknown): boolean {
+  return Array.isArray(a);
 }
 
 export default {
@@ -278,18 +289,24 @@ export default {
   parseArgs,
   transferableAbortController,
   transferableAbortSignal,
+  getCallSite,
+  isDeepStrictEqual,
+  isArray,
 };
 
 // Node.js util APIs we're currently not supporting
+//
+// The following functions doesn't make sense for Workerd to support in runtime.
 //   * util._errnoException
 //   * util._exceptionWithHostPort
 //   * util.getSystemErrorMap
 //   * util.getSystemErrorName
-//   * util.isArray
+//   * util.parseEnv
+// The following functions are removed from Node.js, and only supported using
+// a polyfill.
 //   * util.isBoolean
 //   * util.isBuffer
 //   * util.isDate
-//   * util.isDeepStrictEqual
 //   * util.isError
 //   * util.isFunction
 //   * util.isNull
@@ -301,3 +318,5 @@ export default {
 //   * util.isString
 //   * util.isSymbol
 //   * util.isUndefined
+// TODO:
+//   * util.styleText

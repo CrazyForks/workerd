@@ -1,4 +1,5 @@
 #include "jsvalue.h"
+
 #include "buffersource.h"
 #include "ser.h"
 
@@ -58,6 +59,17 @@ void JsObject::set(Lock& js, const JsValue& name, const JsValue& value) {
 
 void JsObject::set(Lock& js, kj::StringPtr name, const JsValue& value) {
   set(js, js.strIntern(name), value);
+}
+
+void JsObject::setReadOnly(Lock& js, kj::StringPtr name, const JsValue& value) {
+  v8::Local<v8::String> nameStr = js.strIntern(name);
+  check(inner->DefineOwnProperty(js.v8Context(), nameStr, value,
+      static_cast<v8::PropertyAttribute>(v8::ReadOnly | v8::DontDelete)));
+}
+
+void JsObject::setNonEnumerable(Lock& js, const JsSymbol& name, const JsValue& value) {
+  check(inner->DefineOwnProperty(
+      js.v8Context(), name.inner, value.inner, v8::PropertyAttribute::DontEnum));
 }
 
 JsValue JsObject::get(Lock& js, const JsValue& name) {
@@ -133,6 +145,10 @@ JsArray JsObject::previewEntries(bool* isKeyValue) {
 
 void JsObject::recursivelyFreeze(Lock& js) {
   jsg::recursivelyFreeze(js.v8Context(), inner);
+}
+
+void JsObject::seal(Lock& js) {
+  check(inner->SetIntegrityLevel(js.v8Context(), v8::IntegrityLevel::kSealed));
 }
 
 JsObject JsObject::jsonClone(Lock& js) {
@@ -421,6 +437,10 @@ JsObject Lock::obj() {
   return JsObject(v8::Object::New(v8Isolate));
 }
 
+JsObject Lock::objNoProto() {
+  return JsObject(v8::Object::New(v8Isolate, v8::Null(v8Isolate), nullptr, nullptr, 0));
+}
+
 JsMap Lock::map() {
   return JsMap(v8::Map::New(v8Isolate));
 }
@@ -458,8 +478,11 @@ JsSymbol Lock::symbolInternal(kj::StringPtr str) {
 }
 
 JsArray Lock::arr(kj::ArrayPtr<JsValue> values) {
-  auto items = KJ_MAP(i, values) { return v8::Local<v8::Value>(i); };
-  return JsArray(v8::Array::New(v8Isolate, items.begin(), items.size()));
+  v8::LocalVector<v8::Value> items(v8Isolate, values.size());
+  for (size_t n = 0; n < values.size(); n++) {
+    items[n] = values[n];
+  }
+  return JsArray(v8::Array::New(v8Isolate, items.data(), items.size()));
 }
 
 #define V(Name)                                                                                    \

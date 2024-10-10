@@ -10,16 +10,19 @@
 // can call back to the class's methods. This differs from, say, a struct type, which will be deeply
 // converted into a JS object when passed into JS.
 
-#include <kj/tuple.h>
-#include <kj/debug.h>
-#include <type_traits>
-#include <kj/map.h>
+#include "meta.h"
 #include "util.h"
 #include "wrappable.h"
-#include <typeindex>
-#include "meta.h"
+
 #include <workerd/jsg/memory.h>
 #include <workerd/jsg/modules.capnp.h>
+
+#include <kj/debug.h>
+#include <kj/map.h>
+#include <kj/tuple.h>
+
+#include <type_traits>
+#include <typeindex>
 
 namespace std {
 inline auto KJ_HASHCODE(const std::type_index& idx) {
@@ -1528,7 +1531,27 @@ private:
 
     instance->SetInternalFieldCount(Wrappable::INTERNAL_FIELD_COUNT);
 
-    constructor->SetClassName(v8StrIntern(isolate, typeName(typeid(T))));
+    auto classname = v8StrIntern(isolate, typeName(typeid(T)));
+
+    if (getShouldSetToStringTag(isolate)) {
+      prototype->Set(
+          v8::Symbol::GetToStringTag(isolate), classname, v8::PropertyAttribute::DontEnum);
+    }
+
+    // Previously, miniflare would use the lack of a Symbol.toStringTag on a class to
+    // detect a type that came from the runtime. That's obviously a bit problematic because
+    // Symbol.toStringTag is required for full compliance on standard web platform APIs.
+    // To help use cases where it is necessary to detect if a class is a runtime class, we
+    // will add a special symbol to the prototype of the class to indicate. Note that
+    // because this uses the global symbol registry user code could still mark their own
+    // classes with this symbol but that's unlikely to be a problem in any practical case.
+    auto internalMarker =
+        v8::Symbol::For(isolate, v8StrIntern(isolate, "cloudflare:internal-class"));
+    prototype->Set(internalMarker, internalMarker,
+        static_cast<v8::PropertyAttribute>(v8::PropertyAttribute::DontEnum |
+            v8::PropertyAttribute::DontDelete | v8::PropertyAttribute::ReadOnly));
+
+    constructor->SetClassName(classname);
 
     static_assert(kj::isSameType<typename T::jsgThis, T>(),
         "Name passed to JSG_RESOURCE_TYPE() must be the class's own name.");

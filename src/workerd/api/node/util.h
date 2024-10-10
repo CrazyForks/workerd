@@ -8,6 +8,21 @@
 
 namespace workerd::api::node {
 
+// Originally implemented by Node.js contributors.
+// Available at https://github.com/nodejs/node/blob/b7b96282b212a2274b9db605ac29d388246754de/src/node_buffer.h#L75
+// This is verbose to be explicit with inline commenting
+static constexpr bool IsWithinBounds(size_t off, size_t len, size_t max) noexcept {
+  // Asking to seek too far into the buffer
+  // check to avoid wrapping in subsequent subtraction
+  if (off > max) return false;
+
+  // Asking for more than is left over in the buffer
+  if (max - off < len) return false;
+
+  // Otherwise we're in bounds
+  return true;
+}
+
 class MIMEType;
 
 class MIMEParams final: public jsg::Object {
@@ -73,7 +88,7 @@ private:
 
 class MIMEType final: public jsg::Object {
 public:
-  MIMEType(MimeType inner);
+  explicit MIMEType(MimeType inner);
   ~MIMEType() noexcept(false);
   static jsg::Ref<MIMEType> constructor(kj::String input);
 
@@ -92,12 +107,6 @@ public:
     JSG_READONLY_PROTOTYPE_PROPERTY(params, getParams);
     JSG_METHOD(toString);
     JSG_METHOD_NAMED(toJSON, toString);
-  }
-
-  void visitForMemoryInfo(jsg::MemoryTracker& tracker) const {
-    // TODO(cleanup): Better to have jsg::MimeType be a MemoryRetainer directly
-    tracker.trackFieldWithSize("mimeType", inner.toString().size());
-    tracker.trackField("params", params);
   }
 
 private:
@@ -189,6 +198,16 @@ public:
 
   jsg::JsString getConstructorName(jsg::Lock& js, jsg::JsObject value);
 
+  struct CallSiteEntry {
+    kj::String functionName;
+    kj::String scriptName;
+    int lineNumber;
+    int column;
+
+    JSG_STRUCT(functionName, scriptName, lineNumber, column);
+  };
+  kj::Array<CallSiteEntry> getCallSite(jsg::Lock& js, int frames);
+
 #define V(Type) bool is##Type(jsg::JsValue value);
   JS_UTIL_IS_TYPES(V)
 #undef V
@@ -215,6 +234,7 @@ public:
     JSG_METHOD(getProxyDetails);
     JSG_METHOD(previewEntries);
     JSG_METHOD(getConstructorName);
+    JSG_METHOD(getCallSite);
 
 #define V(Type) JSG_METHOD(is##Type);
     JS_UTIL_IS_TYPES(V)
@@ -232,6 +252,6 @@ public:
       api::node::MIMEType, api::node::MIMEParams, api::node::MIMEParams::EntryIterator,            \
       api::node::MIMEParams::ValueIterator, api::node::MIMEParams::KeyIterator,                    \
       api::node::MIMEParams::EntryIterator::Next, api::node::MIMEParams::ValueIterator::Next,      \
-      api::node::MIMEParams::KeyIterator::Next
+      api::node::MIMEParams::KeyIterator::Next, api::node::UtilModule::CallSiteEntry
 
 }  // namespace workerd::api::node

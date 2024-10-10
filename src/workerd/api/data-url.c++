@@ -1,4 +1,8 @@
 #include "data-url.h"
+
+#include <workerd/api/encoding.h>
+#include <workerd/util/strings.h>
+
 #include <kj/encoding.h>
 
 namespace workerd::api {
@@ -8,18 +12,6 @@ kj::Maybe<DataUrl> DataUrl::tryParse(kj::StringPtr url) {
     return from(url);
   }
   return kj::none;
-}
-
-static constexpr kj::FixedArray<uint8_t, 256> ascii_whitespace_table = []() consteval {
-  kj::FixedArray<uint8_t, 256> result{};
-  for (uint8_t c: {0x09, 0x0a, 0x0c, 0x0d, 0x20}) {
-    result[c] = true;
-  }
-  return result;
-}();
-
-constexpr bool isAsciiWhitespace(uint8_t c) noexcept {
-  return ascii_whitespace_table[c];
 }
 
 kj::Maybe<DataUrl> DataUrl::from(const jsg::Url& url) {
@@ -48,7 +40,7 @@ kj::Maybe<DataUrl> DataUrl::from(const jsg::Url& url) {
   static const auto strip = [](auto label) {
     auto result = kj::heapArray<kj::byte>(label.size());
     size_t len = 0;
-    for (auto c: label) {
+    for (const kj::byte c: label) {
       if (!isAsciiWhitespace(c)) {
         result[len++] = c;
       }

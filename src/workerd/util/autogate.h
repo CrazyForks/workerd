@@ -3,9 +3,10 @@
 //     https://opensource.org/licenses/Apache-2.0
 #pragma once
 
-#include <kj/string.h>
 #include <capnp/blob.h>
 #include <capnp/list.h>
+#include <kj/string.h>
+
 #include <initializer_list>
 
 namespace workerd::util {
@@ -13,9 +14,6 @@ namespace workerd::util {
 // Workerd-specific list of autogate keys (can also be used in internal repo).
 enum class AutogateKey {
   TEST_WORKERD,
-  PYODIDE_LOAD_EXTERNAL,
-  // Enables reporting of disconnection during deferred proxying as a new status.
-  RESPONSE_STREAM_DISCONNECTED_STATUS,
   NumOfKeys  // Reserved for iteration.
 };
 

@@ -6,13 +6,14 @@ import {
   getSitePackagesPath,
 } from 'pyodide-internal:setupPackages';
 import { default as TarReader } from 'pyodide-internal:packages_tar_reader';
-import processScriptImports from 'pyodide-internal:process_script_imports.py';
 import {
   SHOULD_SNAPSHOT_TO_DISK,
   IS_CREATING_BASELINE_SNAPSHOT,
   MEMORY_SNAPSHOT_READER,
+  REQUIREMENTS,
 } from 'pyodide-internal:metadata';
 import { reportError, simpleRunPython } from 'pyodide-internal:util';
+import { default as MetadataReader } from 'pyodide-internal:runtime-generated/metadata';
 
 let LOADED_BASELINE_SNAPSHOT: number;
 
@@ -160,17 +161,6 @@ export function preloadDynamicLibs(Module: Module): void {
   }
 }
 
-export function getSnapshotSettings() {
-  return {
-    preRun: [preloadDynamicLibs],
-    // if SNAPSHOT_SIZE is defined, start with the linear memory big enough to
-    // fit the snapshot. If it's not defined, this falls back to the default.
-    INITIAL_MEMORY: SNAPSHOT_SIZE,
-    // skip running main() if we have a snapshot
-    noInitialRun: SHOULD_RESTORE_SNAPSHOT,
-  };
-}
-
 type DylinkInfo = {
   [name: string]: { handles: string[] };
 } & {
@@ -207,27 +197,10 @@ function recordDsoHandles(Module: Module): DylinkInfo {
 // the linear memory snapshot has them already initialized.
 // Can get this list by starting Python and filtering sys.modules for modules
 // whose importer is not FrozenImporter or BuiltinImporter.
-const SNAPSHOT_IMPORTS = [
-  '_pyodide.docstring',
-  '_pyodide._core_docs',
-  'traceback',
-  'collections.abc',
-  // Asyncio is the really slow one here. In native Python on my machine, `import asyncio` takes ~50
-  // ms.
-  'asyncio',
-  'inspect',
-  'tarfile',
-  'importlib.metadata',
-  're',
-  'shutil',
-  'sysconfig',
-  'importlib.machinery',
-  'pathlib',
-  'site',
-  'tempfile',
-  'typing',
-  'zipfile',
-];
+//
+const SNAPSHOT_IMPORTS: string[] =
+  // @ts-ignore getSnapshotImports is a static method.
+  ArtifactBundler.constructor.getSnapshotImports();
 
 /**
  * Python modules do a lot of work the first time they are imported. The memory
@@ -261,24 +234,33 @@ function memorySnapshotDoImports(Module: Module): Array<string> {
     return [];
   }
 
-  // Process the Python modules in the user worker looking for imports of packages which are not
-  // vendored. Vendored packages are skipped because they may contain sensitive information which
-  // we do not want to include in the package snapshot.
-  //
-  // See process_script_imports.py.
-  const processScriptImportsString = new TextDecoder().decode(
-    new Uint8Array(processScriptImports)
-  );
-  simpleRunPython(Module, processScriptImportsString);
+  if (REQUIREMENTS.length == 0) {
+    // Don't attempt to scan for package imports if the Worker has specified no package
+    // requirements, as this means their code isn't going to be importing any modules that we need
+    // to include in a snapshot.
+    return [];
+  }
 
-  const importedModules: Array<string> = JSON.parse(
-    simpleRunPython(
-      Module,
-      'import sys, json; print(json.dumps(CF_LOADED_MODULES), file=sys.stderr)'
-    )
-  );
+  // The `importedModules` list will contain all modules that have been imported, including local
+  // modules, the usual `js` and other stdlib modules. We want to filter out local imports, so we
+  // grab them and put them into a set for fast filtering.
+  const importedModules: Array<string> =
+    // @ts-ignore filterPythonScriptImportsJs is a static method.
+    ArtifactBundler.constructor.filterPythonScriptImportsJs(
+      MetadataReader.getNames(),
+      ArtifactBundler.constructor
+        // @ts-ignore parsePythonScriptImports is a static method.
+        .parsePythonScriptImports(MetadataReader.getWorkerFiles('py'))
+    );
 
-  return importedModules;
+  const deduplicatedModules = [...new Set(importedModules)];
+
+  // Import the modules list so they are included in the snapshot.
+  if (deduplicatedModules.length > 0) {
+    simpleRunPython(Module, 'import ' + deduplicatedModules.join(','));
+  }
+
+  return deduplicatedModules;
 }
 
 function checkLoadedSoFiles(dsoJSON: DylinkInfo): void {
@@ -407,6 +389,7 @@ export function restoreSnapshot(Module: Module): void {
   if (!READ_MEMORY) {
     throw Error('READ_MEMORY not defined when restoring snapshot');
   }
+  Module.growMemory(SNAPSHOT_SIZE!);
   READ_MEMORY(Module);
 }
 
@@ -437,9 +420,8 @@ let TEST_SNAPSHOT: Uint8Array | undefined = undefined;
 })();
 
 export function finishSnapshotSetup(pyodide: Pyodide): void {
-  if (DSO_METADATA?.settings?.baselineSnapshot) {
-    // Invalidate caches if we have a baseline snapshot because the contents of site-packages may
-    // have changed.
+  if (LOADED_SNAPSHOT_VERSION !== undefined) {
+    // Invalidate caches if we have a snapshot because the contents of site-packages may have changed.
     simpleRunPython(
       pyodide._module,
       'from importlib import invalidate_caches as f; f(); del f'

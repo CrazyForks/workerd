@@ -10,8 +10,11 @@ $Cxx.allowCancellation;
 
 struct ImpliedByAfterDate @0x8f8c1b68151b6cff {
   # Annotates a compatibility flag to indicate that it is implied by the enablement
-  # of the named flag after the specified date.
-  name @0 :Text;
+  # of the named flag(s) after the specified date.
+  union {
+    name @0 :Text;
+    names @2 :List(Text);
+  }
   date @1 :Text;
 }
 
@@ -36,6 +39,9 @@ struct PythonSnapshotRelease @0x89c66fb883cb6975 {
   # For example "2024-02-18".
   backport @3 :Int64;
   # A number that is incremented each time we need to backport a fix to an existing Python release.
+  baselineSnapshotHash @4 :Text;
+  # A sha256 checksum hash of the baseline/universal memory snapshot to use for Python Workers using
+  # this release.
 }
 
 
@@ -424,7 +430,8 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   pythonWorkers @43 :Bool
       $compatEnableFlag("python_workers")
       $pythonSnapshotRelease(pyodide = "0.26.0a2", pyodideRevision = "2024-03-01",
-          packages = "2024-03-01", backport = 0)
+          packages = "2024-03-01", backport = 3,
+          baselineSnapshotHash = "d13ce2f4a0ade2e09047b469874dacf4d071ed3558fec4c26f8d0b99d95f77b5")
       $impliedByAfterDate(name = "pythonWorkersDevPyodide", date = "2000-01-01");
   # Enables Python Workers. Access to this flag is not restricted, instead bundles containing
   # Python modules are restricted in EWC.
@@ -486,7 +493,7 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   nodeJsCompatV2 @50 :Bool
       $compatEnableFlag("nodejs_compat_v2")
       $compatDisableFlag("no_nodejs_compat_v2")
-      $impliedByAfterDate(name = "nodeJsCompat", date = "2024-09-02");
+      $impliedByAfterDate(name = "nodeJsCompat", date = "2024-09-23");
   # Implies nodeJSCompat with the following additional modifications:
   # * Node.js Compat built-ins may be imported/required with or without the node: prefix
   # * Node.js Compat the globals Buffer and process are available everywhere
@@ -577,15 +584,59 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   pythonWorkersDevPyodide @58 :Bool
     $compatEnableFlag("python_workers_development")
     $pythonSnapshotRelease(pyodide = "dev", pyodideRevision = "dev",
-          packages = "2024-03-01", backport = 0)
+          packages = "2024-03-01", backport = 0,
+          baselineSnapshotHash = "92859211804cd350f9e14010afad86e584bdd017dc7acfd94709a87f3220afae")
     $experimental;
   # Enables Python Workers and uses the bundle from the Pyodide source directory directly. For testing only.
+  #
+  # Note that the baseline snapshot hash here refers to the one used in
+  # `baseline-from-gcs.ew-test-bin.c++`. We don't intend to ever load it in production.
 
   nodeJsZlib @59 :Bool
       $compatEnableFlag("nodejs_zlib")
       $compatDisableFlag("no_nodejs_zlib")
-      $experimental;
+      $impliedByAfterDate(names = ["nodeJsCompat", "nodeJsCompatV2"], date = "2024-09-23");
   # Enables node:zlib implementation while it is in-development.
   # Once the node:zlib implementation is complete, this will be automatically enabled when
-  # nodejs_compat is enabled.
+  # nodejs_compat or nodejs_compat_v2 are enabled.
+
+  replicaRouting @60 :Bool
+      $compatEnableFlag("replica_routing")
+      $experimental;
+  # Enables routing to a replica on the client-side.
+  # Doesn't mean requests *will* be routed to a replica, only that they can be.
+
+  enableD1WithSessionsAPI @61 :Bool
+      $compatEnableFlag("enable_d1_with_sessions_api")
+      $experimental;
+  # Enables the withSessions(commitTokenOrConstraint) method that allows users
+  # to use read-replication for D1.
+  # Experimental since this is not yet ready and is only meant for internal testing during development.
+
+  handleCrossRequestPromiseResolution @62 :Bool
+      $compatEnableFlag("handle_cross_request_promise_resolution")
+      $compatDisableFlag("no_handle_cross_request_promise_resolution")
+      $compatEnableDate("2024-10-14");
+  # Historically, it has been possible to resolve a promise from an incorrect request
+  # IoContext. This leads to issues with promise continuations being scheduled to run
+  # in the wrong IoContext leading to errors and difficult to diagnose bugs. With this
+  # compatibility flag we arrange to have such promise continuations scheduled to run
+  # in the correct IoContext if it is still alive, or dropped on the floor with a warning
+  # if the correct IoContext is not still alive.
+  pythonExternalBundle @63 :Bool
+      $compatEnableFlag("python_external_bundle")
+      $experimental;
+  # Temporary flag to load Python from external capnproto bundle loaded at runtime.
+  # We plan to turn this on always quite soon. It would be an autogate but we need to test
+  # our logic both at upload time and at runtime, and this seemed like the easiest way to
+  # make sure we keep things in sync.
+
+  setToStringTag @64 :Bool
+      $compatEnableFlag("set_tostring_tag")
+      $compatDisableFlag("do_not_set_tostring_tag")
+      $compatEnableDate("2024-09-26");
+  # A change was made that set the Symbol.toStringTag on all jsg::Objects in order to
+  # fix several spec compliance bugs. Unfortunately it turns out that was more breaking
+  # than expected. This flag restores the original behavior for compat dates before
+  # 2024-09-26
 }

@@ -3,16 +3,11 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "workerd-api.h"
+
 #include "workerd/api/worker-rpc.h"
 
-#include <workerd/jsg/jsg.h>
-#include <workerd/jsg/modules.h>
-#include <workerd/jsg/modules-new.h>
-#include <workerd/jsg/url.h>
-#include <workerd/jsg/util.h>
-#include <workerd/jsg/setup.h>
-#include <workerd/api/actor.h>
 #include <workerd/api/actor-state.h>
+#include <workerd/api/actor.h>
 #include <workerd/api/analytics-engine.h>
 #include <workerd/api/cache.h>
 #include <workerd/api/crypto/impl.h>
@@ -23,27 +18,33 @@
 #include <workerd/api/html-rewriter.h>
 #include <workerd/api/hyperdrive.h>
 #include <workerd/api/kv.h>
+#include <workerd/api/memory-cache.h>
 #include <workerd/api/modules.h>
+#include <workerd/api/node/node.h>
 #include <workerd/api/pyodide/pyodide.h>
 #include <workerd/api/queue.h>
+#include <workerd/api/r2-admin.h>
+#include <workerd/api/r2.h>
 #include <workerd/api/scheduled.h>
 #include <workerd/api/sockets.h>
-#include <workerd/api/streams/standard.h>
 #include <workerd/api/sql.h>
-#include <workerd/api/r2.h>
-#include <workerd/api/r2-admin.h>
+#include <workerd/api/streams.h>
+#include <workerd/api/streams/standard.h>
 #include <workerd/api/trace.h>
 #include <workerd/api/unsafe.h>
+#include <workerd/api/url-standard.h>
 #include <workerd/api/urlpattern.h>
-#include <workerd/api/memory-cache.h>
-#include <workerd/api/node/node.h>
+#include <workerd/io/compatibility-date.h>
 #include <workerd/io/promise-wrapper.h>
+#include <workerd/jsg/jsg.h>
+#include <workerd/jsg/modules-new.h>
+#include <workerd/jsg/setup.h>
+#include <workerd/jsg/url.h>
+#include <workerd/jsg/util.h>
+#include <workerd/server/actor-id-impl.h>
 #include <workerd/util/thread-scopes.h>
 #include <workerd/util/use-perfetto-categories.h>
-#include <workerd/server/actor-id-impl.h>
-#include <openssl/sha.h>
-#include <openssl/hmac.h>
-#include <openssl/rand.h>
+
 #include <kj/compat/http.h>
 #include <kj/compat/tls.h>
 #include <kj/compat/url.h>
@@ -246,7 +247,7 @@ WorkerdApi::EntrypointClasses WorkerdApi::getEntrypointClasses(jsg::Lock& lock) 
   return {
     .workerEntrypoint = typedLock.getConstructor<api::WorkerEntrypoint>(lock.v8Context()),
     .durableObject = typedLock.getConstructor<api::DurableObjectBase>(lock.v8Context()),
-    .workflow = typedLock.getConstructor<api::Workflow>(lock.v8Context()),
+    .workflowEntrypoint = typedLock.getConstructor<api::WorkflowEntrypoint>(lock.v8Context()),
   };
 }
 const jsg::TypeHandler<Worker::Api::ErrorInterface>& WorkerdApi::getErrorInterfaceTypeHandler(
@@ -510,7 +511,7 @@ void WorkerdApi::compileModules(jsg::Lock& lockParam,
       KJ_REQUIRE(featureFlags.getPythonWorkers(),
           "The python_workers compatibility flag is required to use Python.");
       // Inject Pyodide bundle
-      if (util::Autogate::isEnabled(util::AutogateKey::PYODIDE_LOAD_EXTERNAL)) {
+      if (featureFlags.getPythonExternalBundle()) {
         auto pythonRelease = KJ_ASSERT_NONNULL(getPythonSnapshotRelease(featureFlags));
         auto version = getPythonBundleName(pythonRelease);
         auto bundle = KJ_ASSERT_NONNULL(
@@ -763,9 +764,8 @@ static v8::Local<v8::Value> createBindingValue(JsgWorkerdIsolate::Lock& lock,
         KJ_ASSERT(fn->IsFunction(), "Entrypoint is not a function", wrapped.entrypoint);
 
         // invoke the function, its result will be binding value
-        auto args = kj::arr(env.As<v8::Value>());
-        value = jsg::check(
-            v8::Function::Cast(*fn)->Call(context, context->Global(), args.size(), args.begin()));
+        v8::Local<v8::Value> arg = env.As<v8::Value>();
+        value = jsg::check(v8::Function::Cast(*fn)->Call(context, context->Global(), 1, &arg));
       } else {
         KJ_LOG(
             ERROR, "wrapped binding module can't be resolved (internal modules only)", moduleName);
@@ -883,6 +883,44 @@ kj::Own<jsg::modules::ModuleRegistry> WorkerdApi::initializeBundleModuleRegistry
     const PythonConfig& pythonConfig) {
   jsg::modules::ModuleRegistry::Builder builder(
       observer, jsg::modules::ModuleRegistry::Builder::Options::ALLOW_FALLBACK);
+  builder.setEvalCallback([](jsg::Lock& js, const auto& module, v8::Local<v8::Module> v8Module,
+                              const auto& observer) -> jsg::Promise<jsg::Value> {
+    static constexpr auto handleDynamicImport =
+        [](kj::Own<const Worker> worker, const auto& module, jsg::V8Ref<v8::Module> v8Module,
+            const auto& observer, kj::Maybe<jsg::Ref<jsg::AsyncContextFrame>> asyncContext)
+        -> kj::Promise<jsg::Promise<jsg::Value>> {
+      co_await kj::yield();
+      KJ_ASSERT(!IoContext::hasCurrent());
+      auto asyncLock = co_await worker->takeAsyncLockWithoutRequest(nullptr);
+
+      co_return worker->runInLockScope(asyncLock, [&](Worker::Lock& lock) {
+        return JSG_WITHIN_CONTEXT_SCOPE(lock, lock.getContext(), [&](jsg::Lock& js) {
+          jsg::AsyncContextFrame::Scope asyncContextScope(js, asyncContext);
+          return js.tryCatch([&] {
+            return js.toPromise(jsg::check(v8Module.getHandle(js)->Evaluate(js.v8Context())));
+          }, [&](jsg::Value&& exception) {
+            return js.rejectedPromise<jsg::Value>(kj::mv(exception));
+          });
+        });
+      });
+    };
+
+    // If there is an active IoContext, then we want to defer evaluation of the
+    // module to escape the current IoContext.
+    if (IoContext::hasCurrent()) {
+      auto& context = IoContext::current();
+      return context.awaitIo(js,
+          handleDynamicImport(kj::atomicAddRef(context.getWorker()), module, js.v8Ref(v8Module),
+              observer, jsg::AsyncContextFrame::currentRef(js)),
+          [](jsg::Lock& js, jsg::Promise<jsg::Value>&& result) { return kj::mv(result); });
+    }
+
+    // If there is no active IoContext at this point, then we can evaluate the module
+    // immediately.
+    return js.tryCatch([&]() -> jsg::Promise<jsg::Value> {
+      return js.toPromise(jsg::check(v8Module->Evaluate(js.v8Context())));
+    }, [&](jsg::Value&& exception) { return js.rejectedPromise<jsg::Value>(kj::mv(exception)); });
+  });
 
   api::registerBuiltinModules<JsgWorkerdIsolate_TypeWrapper>(builder, featureFlags);
 

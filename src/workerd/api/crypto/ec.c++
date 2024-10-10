@@ -2,19 +2,24 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
-#include "impl.h"
 #include "ec.h"
+
+#include "impl.h"
 #include "keys.h"
-#include <openssl/ec_key.h>
-#include <openssl/bn.h>
-#include <openssl/x509.h>
-#include <openssl/crypto.h>
-#include <openssl/curve25519.h>
-#include <map>
-#include <kj/function.h>
-#include <type_traits>
+
 #include <workerd/api/util.h>
 #include <workerd/io/features.h>
+
+#include <openssl/bn.h>
+#include <openssl/crypto.h>
+#include <openssl/curve25519.h>
+#include <openssl/ec_key.h>
+#include <openssl/x509.h>
+
+#include <kj/function.h>
+
+#include <map>
+#include <type_traits>
 
 namespace workerd::api {
 
@@ -65,8 +70,8 @@ SubtleCrypto::JsonWebKey Ec::toJwk(KeyType keyType, kj::StringPtr curveName) con
   auto xa = handleBn(*x, groupDegreeInBytes);
   auto ya = handleBn(*y, groupDegreeInBytes);
 
-  jwk.x = kj::encodeBase64Url(xa);
-  jwk.y = kj::encodeBase64Url(ya);
+  jwk.x = fastEncodeBase64Url(xa);
+  jwk.y = fastEncodeBase64Url(ya);
 
   if (keyType == KeyType::PRIVATE) {
     const auto privateKey = getPrivateKey();
@@ -74,7 +79,7 @@ SubtleCrypto::JsonWebKey Ec::toJwk(KeyType keyType, kj::StringPtr curveName) con
         "Error getting private key material for JSON Web Key export",
         internalDescribeOpensslErrors());
     auto pk = handleBn(*privateKey, groupDegreeInBytes);
-    jwk.d = kj::encodeBase64Url(pk);
+    jwk.d = fastEncodeBase64Url(pk);
   }
   return jwk;
 }
@@ -988,7 +993,7 @@ private:
     SubtleCrypto::JsonWebKey jwk;
     jwk.kty = kj::str("OKP");
     jwk.crv = kj::str(getAlgorithmName() == "X25519"_kj ? "X25519"_kj : "Ed25519"_kj);
-    jwk.x = kj::encodeBase64Url(kj::arrayPtr(rawPublicKey, publicKeyLen));
+    jwk.x = fastEncodeBase64Url(kj::arrayPtr(rawPublicKey, publicKeyLen));
     if (getAlgorithmName() == "Ed25519"_kj) {
       jwk.alg = kj::str("EdDSA");
     }
@@ -1006,7 +1011,7 @@ private:
 
       KJ_ASSERT(privateKeyLen == 32, privateKeyLen);
 
-      jwk.d = kj::encodeBase64Url(kj::arrayPtr(rawPrivateKey, privateKeyLen));
+      jwk.d = fastEncodeBase64Url(kj::arrayPtr(rawPrivateKey, privateKeyLen));
     }
 
     return jwk;

@@ -3,11 +3,14 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "standard.h"
-#include <kj/debug.h>
+
 #include "readable.h"
 #include "writable.h"
-#include <workerd/jsg/buffersource.h>
+
+#include <workerd/jsg/jsg.h>
 #include <workerd/util/weak-refs.h>
+
+#include <kj/debug.h>
 #include <kj/vector.h>
 
 namespace workerd::api {
@@ -70,10 +73,8 @@ public:
   }
   void jsgGetMemoryInfo(jsg::MemoryTracker& tracker) const {
     KJ_SWITCH_ONEOF(state) {
-      KJ_CASE_ONEOF(locked, Locked) {
-      }
-      KJ_CASE_ONEOF(unlocked, Unlocked) {
-      }
+      KJ_CASE_ONEOF(locked, Locked) {}
+      KJ_CASE_ONEOF(unlocked, Unlocked) {}
       KJ_CASE_ONEOF(pipeLocked, PipeLocked) {
         tracker.trackField("pipeLocked", pipeLocked);
       }
@@ -165,10 +166,8 @@ public:
 
   JSG_MEMORY_INFO(WritableLockImpl) {
     KJ_SWITCH_ONEOF(state) {
-      KJ_CASE_ONEOF(unlocked, Unlocked) {
-      }
-      KJ_CASE_ONEOF(locked, Locked) {
-      }
+      KJ_CASE_ONEOF(unlocked, Unlocked) {}
+      KJ_CASE_ONEOF(locked, Locked) {}
       KJ_CASE_ONEOF(writerLocked, WriterLocked) {
         tracker.trackField("writerLocked", writerLocked);
       }
@@ -250,10 +249,8 @@ void ReadableLockImpl<Controller>::releaseReader(
     KJ_IF_SOME(js, maybeJs) {
       auto reason = js.typeError("This ReadableStream reader has been released."_kj);
       KJ_SWITCH_ONEOF(self.state) {
-        KJ_CASE_ONEOF(closed, StreamStates::Closed) {
-        }
-        KJ_CASE_ONEOF(errored, StreamStates::Errored) {
-        }
+        KJ_CASE_ONEOF(closed, StreamStates::Closed) {}
+        KJ_CASE_ONEOF(errored, StreamStates::Errored) {}
         KJ_CASE_ONEOF(consumer, kj::Own<ValueReadable>) {
           consumer->cancelPendingReads(js, reason);
         }
@@ -293,10 +290,8 @@ kj::Maybe<ReadableStreamController::PipeController&> ReadableLockImpl<Controller
 template <typename Controller>
 void ReadableLockImpl<Controller>::visitForGc(jsg::GcVisitor& visitor) {
   KJ_SWITCH_ONEOF(state) {
-    KJ_CASE_ONEOF(locked, Locked) {
-    }
-    KJ_CASE_ONEOF(locked, Unlocked) {
-    }
+    KJ_CASE_ONEOF(locked, Locked) {}
+    KJ_CASE_ONEOF(locked, Unlocked) {}
     KJ_CASE_ONEOF(locked, PipeLocked) {
       visitor.visit(locked);
     }
@@ -323,10 +318,8 @@ void ReadableLockImpl<Controller>::onClose(jsg::Lock& js) {
     KJ_CASE_ONEOF(locked, ReadableLockImpl::PipeLocked) {
       state.template init<Unlocked>();
     }
-    KJ_CASE_ONEOF(locked, Locked) {
-    }
-    KJ_CASE_ONEOF(locked, Unlocked) {
-    }
+    KJ_CASE_ONEOF(locked, Locked) {}
+    KJ_CASE_ONEOF(locked, Unlocked) {}
   }
 }
 
@@ -347,10 +340,8 @@ void ReadableLockImpl<Controller>::onError(jsg::Lock& js, v8::Local<v8::Value> r
     KJ_CASE_ONEOF(locked, ReadableLockImpl::PipeLocked) {
       state.template init<Unlocked>();
     }
-    KJ_CASE_ONEOF(locked, Locked) {
-    }
-    KJ_CASE_ONEOF(locked, Unlocked) {
-    }
+    KJ_CASE_ONEOF(locked, Locked) {}
+    KJ_CASE_ONEOF(locked, Unlocked) {}
   }
 }
 
@@ -415,10 +406,8 @@ void WritableLockImpl<Controller>::releaseWriter(
   KJ_ASSERT(&locked.getWriter() == &writer);
   KJ_IF_SOME(js, maybeJs) {
     KJ_SWITCH_ONEOF(self.state) {
-      KJ_CASE_ONEOF(closed, StreamStates::Closed) {
-      }
-      KJ_CASE_ONEOF(errored, StreamStates::Errored) {
-      }
+      KJ_CASE_ONEOF(closed, StreamStates::Closed) {}
+      KJ_CASE_ONEOF(errored, StreamStates::Errored) {}
       KJ_CASE_ONEOF(controller, jsg::Ref<WritableStreamDefaultController>) {
         controller->cancelPendingWrites(
             js, js.typeError("This WritableStream writer has been released."_kjc));
@@ -471,10 +460,8 @@ void WritableLockImpl<Controller>::releasePipeLock() {
 template <typename Controller>
 void WritableLockImpl<Controller>::visitForGc(jsg::GcVisitor& visitor) {
   KJ_SWITCH_ONEOF(state) {
-    KJ_CASE_ONEOF(locked, Unlocked) {
-    }
-    KJ_CASE_ONEOF(locked, Locked) {
-    }
+    KJ_CASE_ONEOF(locked, Unlocked) {}
+    KJ_CASE_ONEOF(locked, Locked) {}
     KJ_CASE_ONEOF(locked, WriterLocked) {
       visitor.visit(locked);
     }
@@ -1124,8 +1111,7 @@ void ReadableImpl<Self>::pullIfNeeded(jsg::Lock& js, jsg::Ref<Self> self) {
 template <typename Self>
 void ReadableImpl<Self>::visitForGc(jsg::GcVisitor& visitor) {
   KJ_SWITCH_ONEOF(state) {
-    KJ_CASE_ONEOF(closed, StreamStates::Closed) {
-    }
+    KJ_CASE_ONEOF(closed, StreamStates::Closed) {}
     KJ_CASE_ONEOF(errored, StreamStates::Errored) {
       visitor.visit(errored);
     }
@@ -1575,10 +1561,8 @@ jsg::Promise<void> WritableImpl<Self>::write(
 template <typename Self>
 void WritableImpl<Self>::visitForGc(jsg::GcVisitor& visitor) {
   KJ_SWITCH_ONEOF(state) {
-    KJ_CASE_ONEOF(closed, StreamStates::Closed) {
-    }
-    KJ_CASE_ONEOF(writable, Writable) {
-    }
+    KJ_CASE_ONEOF(closed, StreamStates::Closed) {}
+    KJ_CASE_ONEOF(writable, Writable) {}
     KJ_CASE_ONEOF(error, StreamStates::Errored) {
       visitor.visit(error);
     }
@@ -2539,8 +2523,7 @@ kj::Maybe<ReadableStreamController::PipeController&> ReadableStreamJsController:
 void ReadableStreamJsController::visitForGc(jsg::GcVisitor& visitor) {
   KJ_IF_SOME(pendingState, maybePendingState) {
     KJ_SWITCH_ONEOF(pendingState) {
-      KJ_CASE_ONEOF(closed, StreamStates::Closed) {
-      }
+      KJ_CASE_ONEOF(closed, StreamStates::Closed) {}
       KJ_CASE_ONEOF(error, StreamStates::Errored) {
         visitor.visit(error);
       }
@@ -2548,8 +2531,7 @@ void ReadableStreamJsController::visitForGc(jsg::GcVisitor& visitor) {
   }
 
   KJ_SWITCH_ONEOF(state) {
-    KJ_CASE_ONEOF(closed, StreamStates::Closed) {
-    }
+    KJ_CASE_ONEOF(closed, StreamStates::Closed) {}
     KJ_CASE_ONEOF(error, StreamStates::Errored) {
       visitor.visit(error);
     }
@@ -2680,8 +2662,7 @@ public:
 
   void visitForGc(jsg::GcVisitor& visitor) {
     KJ_SWITCH_ONEOF(state) {
-      KJ_CASE_ONEOF(closed, StreamStates::Closed) {
-      }
+      KJ_CASE_ONEOF(closed, StreamStates::Closed) {}
       KJ_CASE_ONEOF(errored, StreamStates::Errored) {
         visitor.visit(errored);
       }
@@ -3611,8 +3592,7 @@ jsg::Promise<void> WritableStreamJsController::write(
 
 void WritableStreamJsController::visitForGc(jsg::GcVisitor& visitor) {
   KJ_SWITCH_ONEOF(state) {
-    KJ_CASE_ONEOF(closed, StreamStates::Closed) {
-    }
+    KJ_CASE_ONEOF(closed, StreamStates::Closed) {}
     KJ_CASE_ONEOF(error, StreamStates::Errored) {
       visitor.visit(error);
     }
@@ -3919,16 +3899,14 @@ void WritableImpl<Self>::jsgGetMemoryInfo(jsg::MemoryTracker& tracker) const {
   tracker.trackField("signal", signal);
 
   KJ_SWITCH_ONEOF(state) {
-    KJ_CASE_ONEOF(closed, StreamStates::Closed) {
-    }
+    KJ_CASE_ONEOF(closed, StreamStates::Closed) {}
     KJ_CASE_ONEOF(error, StreamStates::Errored) {
       tracker.trackField("error", error);
     }
     KJ_CASE_ONEOF(erroring, StreamStates::Erroring) {
       tracker.trackField("erroring", erroring.reason);
     }
-    KJ_CASE_ONEOF(writable, Writable) {
-    }
+    KJ_CASE_ONEOF(writable, Writable) {}
   }
 
   tracker.trackField("abortAlgorithm", algorithms.abort);
@@ -3956,8 +3934,7 @@ size_t WritableStreamJsController::jsgGetMemorySelfSize() const {
 
 void WritableStreamJsController::jsgGetMemoryInfo(jsg::MemoryTracker& tracker) const {
   KJ_SWITCH_ONEOF(state) {
-    KJ_CASE_ONEOF(closed, StreamStates::Closed) {
-    }
+    KJ_CASE_ONEOF(closed, StreamStates::Closed) {}
     KJ_CASE_ONEOF(error, StreamStates::Errored) {
       tracker.trackField("error", error);
     }
@@ -3983,8 +3960,7 @@ size_t ReadableStreamJsController::jsgGetMemorySelfSize() const {
 
 void ReadableStreamJsController::jsgGetMemoryInfo(jsg::MemoryTracker& tracker) const {
   KJ_SWITCH_ONEOF(state) {
-    KJ_CASE_ONEOF(closed, StreamStates::Closed) {
-    }
+    KJ_CASE_ONEOF(closed, StreamStates::Closed) {}
     KJ_CASE_ONEOF(error, StreamStates::Errored) {
       tracker.trackField("error", error);
     }
@@ -4000,8 +3976,7 @@ void ReadableStreamJsController::jsgGetMemoryInfo(jsg::MemoryTracker& tracker) c
 
   KJ_IF_SOME(pendingState, maybePendingState) {
     KJ_SWITCH_ONEOF(pendingState) {
-      KJ_CASE_ONEOF(closed, StreamStates::Closed) {
-      }
+      KJ_CASE_ONEOF(closed, StreamStates::Closed) {}
       KJ_CASE_ONEOF(error, StreamStates::Errored) {
         tracker.trackField("pendingError", error);
       }
@@ -4022,8 +3997,7 @@ size_t ReadableImpl<Self>::jsgGetMemorySelfSize() const {
 template <class Self>
 void ReadableImpl<Self>::jsgGetMemoryInfo(jsg::MemoryTracker& tracker) const {
   KJ_SWITCH_ONEOF(state) {
-    KJ_CASE_ONEOF(closed, StreamStates::Closed) {
-    }
+    KJ_CASE_ONEOF(closed, StreamStates::Closed) {}
     KJ_CASE_ONEOF(error, StreamStates::Errored) {
       tracker.trackField("error", error);
     }

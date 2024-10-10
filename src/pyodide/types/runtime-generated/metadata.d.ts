@@ -7,6 +7,7 @@ declare namespace MetadataReader {
   const getMainModule: () => string;
   const hasMemorySnapshot: () => boolean;
   const getNames: () => string[];
+  const getWorkerFiles: (ext: string) => string[];
   const getSizes: () => number[];
   const readMemorySnapshot: (
     offset: number,
@@ -14,6 +15,9 @@ declare namespace MetadataReader {
   ) => void;
   const getMemorySnapshotSize: () => number;
   const disposeMemorySnapshot: () => void;
+  const shouldUsePackagesInArtifactBundler: () => boolean;
+  const getPackagesVersion: () => string;
+  const getPackagesLock: () => string;
   const read: (index: number, position: number, buffer: Uint8Array) => number;
 }
 

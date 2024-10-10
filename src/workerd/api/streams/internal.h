@@ -5,7 +5,10 @@
 #pragma once
 
 #include "common.h"
+#include "writable.h"
+
 #include <workerd/io/io-context.h>
+
 #include <deque>
 
 namespace workerd::api {

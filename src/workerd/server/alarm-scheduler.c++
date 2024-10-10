@@ -25,12 +25,12 @@ std::default_random_engine makeSeededRandomEngine() {
 }  // namespace
 
 AlarmScheduler::AlarmScheduler(
-    const kj::Clock& clock, kj::Timer& timer, const SqliteDatabase::Vfs& vfs, kj::PathPtr path)
+    const kj::Clock& clock, kj::Timer& timer, const SqliteDatabase::Vfs& vfs, kj::Path path)
     : clock(clock),
       timer(timer),
       random(makeSeededRandomEngine()),
       db([&] {
-        auto db = kj::heap<SqliteDatabase>(vfs, path,
+        auto db = kj::heap<SqliteDatabase>(vfs, kj::mv(path),
             kj::WriteMode::CREATE | kj::WriteMode::MODIFY | kj::WriteMode::CREATE_PARENT);
         ensureInitialized(*db);
         return kj::mv(db);
@@ -81,6 +81,8 @@ void AlarmScheduler::registerNamespace(kj::StringPtr uniqueKey, GetActorFn getAc
 }
 
 kj::Maybe<kj::Date> AlarmScheduler::getAlarm(ActorKey actor) {
+  // TODO(someday): Might be able to simplify AlarmScheduler somewhat, now that ActorSqlite no
+  // longer relies on it for getAlarm()?
   KJ_IF_SOME(alarm, alarms.find(actor)) {
     if (alarm.status == AlarmStatus::STARTED) {
       // getAlarm() when the alarm handler is running should return null,

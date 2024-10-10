@@ -1,9 +1,10 @@
 #include "memory-cache.h"
 
+#include <workerd/api/util.h>
+#include <workerd/io/io-context.h>
+#include <workerd/io/io-util.h>
 #include <workerd/jsg/jsg.h>
 #include <workerd/jsg/ser.h>
-#include <workerd/io/io-context.h>
-#include <workerd/api/util.h>
 #include <workerd/util/weak-refs.h>
 
 namespace workerd::api {
@@ -29,7 +30,7 @@ static bool hasExpired(const kj::Maybe<double>& expiration, bool allowOutsideIoC
   KJ_IF_SOME(e, expiration) {
     double now = (allowOutsideIoContext && !IoContext::hasCurrent())
         ? getCurrentTimeOutsideIoContext()
-        : api::dateNow();
+        : dateNow();
     return e < now;
   }
   return false;
@@ -37,11 +38,13 @@ static bool hasExpired(const kj::Maybe<double>& expiration, bool allowOutsideIoC
 
 SharedMemoryCache::SharedMemoryCache(kj::Maybe<const MemoryCacheProvider&> provider,
     kj::StringPtr id,
-    kj::Maybe<AdditionalResizeMemoryLimitHandler&> additionalResizeMemoryLimitHandler)
+    kj::Maybe<AdditionalResizeMemoryLimitHandler&> additionalResizeMemoryLimitHandler,
+    const kj::MonotonicClock& timer)
     : data(),
       provider(provider),
       id(kj::str(id)),
-      additionalResizeMemoryLimitHandler(additionalResizeMemoryLimitHandler) {}
+      additionalResizeMemoryLimitHandler(additionalResizeMemoryLimitHandler),
+      timer(timer) {}
 
 SharedMemoryCache::~SharedMemoryCache() noexcept(false) {
   KJ_IF_SOME(p, provider) {
@@ -218,8 +221,9 @@ void SharedMemoryCache::removeIfExistsWhileLocked(
 kj::Own<const SharedMemoryCache> SharedMemoryCache::create(
     kj::Maybe<const MemoryCacheProvider&> provider,
     kj::StringPtr id,
-    kj::Maybe<AdditionalResizeMemoryLimitHandler&> handler) {
-  return kj::atomicRefcounted<const SharedMemoryCache>(provider, id, handler);
+    kj::Maybe<AdditionalResizeMemoryLimitHandler&> handler,
+    const kj::MonotonicClock& timer) {
+  return kj::atomicRefcounted<const SharedMemoryCache>(provider, id, handler, timer);
 }
 
 SharedMemoryCache::Use::Use(kj::Own<const SharedMemoryCache> cache, const Limits& limits)
@@ -239,14 +243,22 @@ SharedMemoryCache::Use::~Use() noexcept(false) {
 }
 
 kj::Maybe<kj::Own<CacheValue>> SharedMemoryCache::Use::getWithoutFallback(
-    const kj::String& key) const {
-  auto data = cache->data.lockExclusive();
+    const kj::String& key, SpanBuilder& span) const {
+  kj::Locked<ThreadUnsafeData> data = [&] {
+    auto memoryCacheLockRecord =
+        ScopedDurationTagger(span, memoryCachekLockWaitTimeTag, cache->timer);
+    return cache->data.lockExclusive();
+  }();
   return cache->getWhileLocked(*data, key);
 }
 
 kj::OneOf<kj::Own<CacheValue>, kj::Promise<SharedMemoryCache::Use::GetWithFallbackOutcome>>
-SharedMemoryCache::Use::getWithFallback(const kj::String& key) const {
-  auto data = cache->data.lockExclusive();
+SharedMemoryCache::Use::getWithFallback(const kj::String& key, SpanBuilder& span) const {
+  kj::Locked<ThreadUnsafeData> data = [&] {
+    auto memoryCacheLockRecord =
+        ScopedDurationTagger(span, memoryCachekLockWaitTimeTag, cache->timer);
+    return cache->data.lockExclusive();
+  }();
   KJ_IF_SOME(existingValue, cache->getWhileLocked(*data, key)) {
     return kj::mv(existingValue);
   } else KJ_IF_SOME(existingInProgress, data->inProgress.find(key)) {
@@ -370,8 +382,11 @@ jsg::Promise<jsg::JsRef<jsg::JsValue>> MemoryCache::read(jsg::Lock& js,
     return js.rejectedPromise<jsg::JsRef<jsg::JsValue>>(js.rangeError("Key too large."_kj));
   }
 
+  auto readSpan = IoContext::current().makeTraceSpan("memory_cache_read"_kjc);
+  auto limeReadSpan = IoContext::current().makeLimeTraceSpan("memory_cache_read"_kjc);
+
   KJ_IF_SOME(fallback, optionalFallback) {
-    KJ_SWITCH_ONEOF(cacheUse.getWithFallback(key.value)) {
+    KJ_SWITCH_ONEOF(cacheUse.getWithFallback(key.value, readSpan)) {
       KJ_CASE_ONEOF(result, kj::Own<CacheValue>) {
         // Optimization: Don't even release the isolate lock if the value is aleady in cache.
         jsg::Deserializer deserializer(js, result->bytes.asPtr());
@@ -379,7 +394,8 @@ jsg::Promise<jsg::JsRef<jsg::JsValue>> MemoryCache::read(jsg::Lock& js,
       }
       KJ_CASE_ONEOF(promise, kj::Promise<SharedMemoryCache::Use::GetWithFallbackOutcome>) {
         return IoContext::current().awaitIo(js, kj::mv(promise),
-            [fallback = kj::mv(fallback), key = kj::str(key.value)](
+            [fallback = kj::mv(fallback), key = kj::str(key.value), span = kj::mv(readSpan),
+                limeSpan = kj::mv(limeReadSpan)](
                 jsg::Lock& js, SharedMemoryCache::Use::GetWithFallbackOutcome cacheResult) mutable
             -> jsg::Promise<jsg::JsRef<jsg::JsValue>> {
           KJ_SWITCH_ONEOF(cacheResult) {
@@ -420,7 +436,7 @@ jsg::Promise<jsg::JsRef<jsg::JsValue>> MemoryCache::read(jsg::Lock& js,
     }
     KJ_UNREACHABLE;
   } else {
-    KJ_IF_SOME(cacheValue, cacheUse.getWithoutFallback(key.value)) {
+    KJ_IF_SOME(cacheValue, cacheUse.getWithoutFallback(key.value, readSpan)) {
       jsg::Deserializer deserializer(js, cacheValue->bytes.asPtr());
       return js.resolvedPromise(jsg::JsRef(js, deserializer.readValue(js)));
     }
@@ -430,10 +446,11 @@ jsg::Promise<jsg::JsRef<jsg::JsValue>> MemoryCache::read(jsg::Lock& js,
 
 // ======================================================================================
 
-MemoryCacheProvider::MemoryCacheProvider(
+MemoryCacheProvider::MemoryCacheProvider(const kj::MonotonicClock& timer,
     kj::Maybe<SharedMemoryCache::AdditionalResizeMemoryLimitHandler>
         additionalResizeMemoryLimitHandler)
-    : additionalResizeMemoryLimitHandler(kj::mv(additionalResizeMemoryLimitHandler)) {}
+    : additionalResizeMemoryLimitHandler(kj::mv(additionalResizeMemoryLimitHandler)),
+      timer(timer) {}
 
 MemoryCacheProvider::~MemoryCacheProvider() noexcept(false) {
   // TODO(cleanup): Later, assuming progress is made on kj::Ptr<T>, we ought to be able
@@ -453,7 +470,7 @@ kj::Own<const SharedMemoryCache> MemoryCacheProvider::getInstance(
             -> SharedMemoryCache::AdditionalResizeMemoryLimitHandler& {
       return const_cast<SharedMemoryCache::AdditionalResizeMemoryLimitHandler&>(handler);
     });
-    return SharedMemoryCache::create(provider, id, handler);
+    return SharedMemoryCache::create(provider, id, handler, timer);
   };
 
   KJ_IF_SOME(cid, cacheId) {

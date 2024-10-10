@@ -5,10 +5,21 @@
 #pragma once
 
 #include <workerd/io/worker.h>
-#include <workerd/server/workerd.capnp.h>
-#include <workerd/jsg/setup.h>
 #include <workerd/jsg/modules-new.h>
-#include <workerd/api/pyodide/pyodide.h>
+#include <workerd/server/workerd.capnp.h>
+
+namespace workerd {
+namespace api {
+namespace pyodide {
+struct PythonConfig;
+}
+}  // namespace api
+}  // namespace workerd
+namespace workerd {
+namespace jsg {
+class V8System;
+}
+}  // namespace workerd
 
 namespace workerd::api {
 class MemoryCacheProvider;

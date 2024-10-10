@@ -4,13 +4,12 @@
 
 #pragma once
 
-#include <workerd/jsg/jsg.h>
 #include "basics.h"
-#include "events.h"
-#include "http.h"
-#include "eventsource.h"
 #include "hibernation-event-params.h"
+#include "http.h"
+
 #include <workerd/io/io-timers.h>
+#include <workerd/jsg/jsg.h>
 #ifdef WORKERD_EXPERIMENTAL_ENABLE_WEBGPU
 #include <workerd/api/gpu/gpu.h>
 #endif
@@ -26,12 +25,17 @@ class Cache;
 class CacheStorage;
 class Crypto;
 class CryptoKey;
+class ErrorEvent;
+class EventSource;
+class FixedLengthStream;
 class SubtleCrypto;
 class TextDecoder;
 class TextEncoder;
 class HTMLRewriter;
+class IdentityTransformStream;
 class Response;
 class TraceItem;
+class TransformStream;
 class ScheduledController;
 class ScheduledEvent;
 class ReadableStream;
@@ -107,6 +111,22 @@ public:
   JSG_RESOURCE_TYPE(Performance) {
     JSG_READONLY_INSTANCE_PROPERTY(timeOrigin, getTimeOrigin);
     JSG_METHOD(now);
+  }
+};
+
+// Exposed as a global to provide access to certain Cloudflare-specific
+// configuration details. This is not a standard API and great care should
+// be taken when deciding to expose new properties or methods here.
+class Cloudflare: public jsg::Object {
+public:
+  // Return an object containing the state of all compatibility flags known to the runtime.
+  jsg::JsObject getCompatibilityFlags(jsg::Lock& js);
+
+  JSG_RESOURCE_TYPE(Cloudflare) {
+    JSG_LAZY_READONLY_INSTANCE_PROPERTY(compatibilityFlags, getCompatibilityFlags);
+
+    JSG_TS_OVERRIDE({ readonly compatibilityFlags: Record<string, boolean>;
+    });
   }
 };
 
@@ -454,7 +474,7 @@ public:
   // ---------------------------------------------------------------------------
   // JS API
 
-  kj::String btoa(jsg::Lock& js, jsg::JsValue data);
+  jsg::JsString btoa(jsg::Lock& js, jsg::JsValue data);
   jsg::JsString atob(jsg::Lock& js, kj::String data);
 
   void queueMicrotask(jsg::Lock& js, v8::Local<v8::Function> task);
@@ -505,6 +525,10 @@ public:
 
   jsg::Ref<Performance> getPerformance() {
     return jsg::alloc<Performance>();
+  }
+
+  jsg::Ref<Cloudflare> getCloudflare() {
+    return jsg::alloc<Cloudflare>();
   }
 
   // The origin is unknown, return "null" as described in
@@ -570,6 +594,7 @@ public:
     JSG_LAZY_INSTANCE_PROPERTY(caches, getCaches);
     JSG_LAZY_INSTANCE_PROPERTY(scheduler, getScheduler);
     JSG_LAZY_INSTANCE_PROPERTY(performance, getPerformance);
+    JSG_LAZY_INSTANCE_PROPERTY(Cloudflare, getCloudflare);
     JSG_READONLY_INSTANCE_PROPERTY(origin, getOrigin);
 
     JSG_NESTED_TYPE(Event);
@@ -824,6 +849,6 @@ private:
   api::WorkerGlobalScope, api::ServiceWorkerGlobalScope, api::TestController,                      \
       api::ExecutionContext, api::ExportedHandler,                                                 \
       api::ServiceWorkerGlobalScope::StructuredCloneOptions, api::PromiseRejectionEvent,           \
-      api::Navigator, api::Performance, api::AlarmInvocationInfo, api::Immediate
+      api::Navigator, api::Performance, api::AlarmInvocationInfo, api::Immediate, api::Cloudflare
 // The list of global-scope.h types that are added to worker.c++'s JSG_DECLARE_ISOLATE_TYPE
 }  // namespace workerd::api

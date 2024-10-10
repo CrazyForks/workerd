@@ -9,8 +9,10 @@
 #include "gpu-compute-pass-encoder.h"
 #include "gpu-render-pass-encoder.h"
 #include "gpu-texture.h"
-#include <webgpu/webgpu_cpp.h>
+
 #include <workerd/jsg/jsg.h>
+
+#include <webgpu/webgpu_cpp.h>
 
 namespace workerd::api::gpu {
 

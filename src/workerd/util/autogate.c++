@@ -2,7 +2,9 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 #include "autogate.h"
+
 #include <workerd/util/sentry.h>
+
 #include <capnp/message.h>
 #include <kj/common.h>
 #include <kj/debug.h>
@@ -15,10 +17,6 @@ kj::StringPtr KJ_STRINGIFY(AutogateKey key) {
   switch (key) {
     case AutogateKey::TEST_WORKERD:
       return "test-workerd"_kj;
-    case AutogateKey::PYODIDE_LOAD_EXTERNAL:
-      return "pyodide-load-external"_kj;
-    case AutogateKey::RESPONSE_STREAM_DISCONNECTED_STATUS:
-      return "response-stream-disconnected-status"_kj;
     case AutogateKey::NumOfKeys:
       KJ_FAIL_ASSERT("NumOfKeys should not be used in getName");
   }

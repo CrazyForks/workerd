@@ -4,14 +4,16 @@
 
 #pragma once
 
-#include <kj/debug.h>
+#include <workerd/io/actor-storage.capnp.h>
+
 #include <kj/async.h>
-#include <workerd/io/actor-storage.h>
-#include <kj/one-of.h>
-#include <kj/map.h>
+#include <kj/debug.h>
 #include <kj/list.h>
-#include <kj/time.h>
+#include <kj/map.h>
 #include <kj/mutex.h>
+#include <kj/one-of.h>
+#include <kj/time.h>
+
 #include <atomic>
 
 namespace workerd {
@@ -207,12 +209,24 @@ public:
 
   virtual void shutdown(kj::Maybe<const kj::Exception&> maybeException) = 0;
 
-  // Call when entering the alarm handler and attach the returned object to the promise representing
-  // the alarm handler's execution.
+  // Possible armAlarmHandler() return values:
   //
-  // The returned object will schedule a write to clear the alarm time if no alarm writes have been
-  // made while it exists. If kj::none is returned, the alarm run should be canceled.
-  virtual kj::Maybe<kj::Own<void>> armAlarmHandler(
+  // Alarm should be canceled without retry (because alarm state has changed such that the
+  // requested alarm time is no longer valid).
+  struct CancelAlarmHandler {
+    // Caller should wait for this promise to complete before canceling.
+    kj::Promise<void> waitBeforeCancel;
+  };
+  // Alarm should be run.
+  struct RunAlarmHandler {
+    // RAII object to delete the alarm, if object is destroyed before setAlarm() or
+    // cancelDeferredAlarmDeletion() are called.  Caller should attach it to a promise
+    // representing the alarm handler's execution.
+    kj::Own<void> deferredDelete;
+  };
+
+  // Call when entering the alarm handler.
+  virtual kj::OneOf<CancelAlarmHandler, RunAlarmHandler> armAlarmHandler(
       kj::Date scheduledTime, bool noCache = false) = 0;
 
   virtual void cancelDeferredAlarmDeletion() = 0;
@@ -296,7 +310,9 @@ public:
   DeleteAllResults deleteAll(WriteOptions options) override;
   kj::Maybe<kj::Promise<void>> evictStale(kj::Date now) override;
   void shutdown(kj::Maybe<const kj::Exception&> maybeException) override;
-  kj::Maybe<kj::Own<void>> armAlarmHandler(kj::Date scheduledTime, bool noCache = false) override;
+
+  kj::OneOf<CancelAlarmHandler, RunAlarmHandler> armAlarmHandler(
+      kj::Date scheduledTime, bool noCache = false) override;
   void cancelDeferredAlarmDeletion() override;
   kj::Maybe<kj::Promise<void>> onNoPendingFlush() override;
   // See ActorCacheInterface

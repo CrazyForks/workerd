@@ -3,7 +3,9 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "jsg.h"
+
 #include "setup.h"
+
 #include <workerd/jsg/util.h>
 #include <workerd/util/thread-scopes.h>
 
@@ -193,6 +195,10 @@ void Lock::setNodeJsCompatEnabled() {
   IsolateBase::from(v8Isolate).setNodeJsCompatEnabled({}, true);
 }
 
+void Lock::setToStringTag() {
+  IsolateBase::from(v8Isolate).enableSetToStringTag();
+}
+
 void Lock::setCommonJsExportDefault(bool exportDefault) {
   IsolateBase::from(v8Isolate).setCommonJsExportDefault({}, exportDefault);
 }
@@ -353,8 +359,7 @@ kj::OneOf<kj::StringPtr, v8::Local<v8::Symbol>> Name::getUnwrapped(v8::Isolate* 
 
 void Name::visitForGc(GcVisitor& visitor) {
   KJ_SWITCH_ONEOF(inner) {
-    KJ_CASE_ONEOF(string, kj::String) {
-    }
+    KJ_CASE_ONEOF(string, kj::String) {}
     KJ_CASE_ONEOF(symbol, V8Ref<v8::Symbol>) {
       visitor.visit(symbol);
     }

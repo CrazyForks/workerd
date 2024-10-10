@@ -1,21 +1,26 @@
 #include "url.h"
+
+#include <workerd/util/strings.h>
+
 #include <kj/hash.h>
 
 extern "C" {
 #include "ada_c.h"
 }
 #include "ada.h"
-#include <string>
-#include <vector>
+
+#include <unicode/uchar.h>
+#include <unicode/utf8.h>
 
 #include <kj/debug.h>
 #include <kj/string-tree.h>
 #include <kj/vector.h>
-#include <unicode/utf8.h>
-#include <unicode/uchar.h>
+
 #include <algorithm>
 #include <map>
 #include <regex>
+#include <string>
+#include <vector>
 
 namespace workerd::jsg {
 
@@ -485,11 +490,6 @@ inline bool isAsciiDigit(char c) {
   return c >= '0' && c <= '9';
 };
 
-inline bool isHexDigit(char c) {
-  // Check if `c` is the ASCII code of a hexadecimal digit.
-  return isAsciiDigit(c) || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F');
-}
-
 inline bool isAscii(char codepoint) {
   return codepoint >= 0x00 && codepoint <= 0x7f;
 };
@@ -611,8 +611,10 @@ kj::Maybe<kj::String> canonicalizeOpaquePathname(
   // @see https://wicg.github.io/urlpattern/#canonicalize-an-opaque-pathname
   if (pathname.size() == 0) return kj::str();
   auto str = kj::str("fake:", pathname);
-  auto url = KJ_ASSERT_NONNULL(Url::tryParse(str.asPtr()));
-  return kj::str(url.getPathname());
+  KJ_IF_SOME(url, Url::tryParse(str.asPtr())) {
+    return kj::str(url.getPathname());
+  }
+  return kj::none;
 }
 
 kj::Maybe<kj::String> canonicalizeSearch(
@@ -2053,6 +2055,9 @@ UrlPattern::Result<UrlPattern::Init> UrlPattern::processInit(
         chooseStr(kj::mv(init.protocol), options.protocol).map([](kj::String&& str) mutable {
       // It's silly but the URL spec always includes the : suffix in the value,
       // while the URLPattern spec always omits it. Silly specs.
+      if (!str.size()) {
+        return kj::mv(str);
+      }
       return stripSuffixFromProtocol(str.asPtr());
     })) {
       result.protocol = kj::mv(protocol);
@@ -2145,8 +2150,7 @@ UrlPattern::Result<UrlPattern::Init> UrlPattern::processInit(
         auto str = kj::str(protocol, "://fake-url");
         return KJ_ASSERT_NONNULL(Url::tryParse(str.asPtr()));
       } else {
-        auto str = kj::str("fake://fake-url");
-        return KJ_ASSERT_NONNULL(Url::tryParse(str.asPtr()));
+        return KJ_ASSERT_NONNULL(Url::tryParse("fake://fake-url"_kj));
       }
     }
   })();

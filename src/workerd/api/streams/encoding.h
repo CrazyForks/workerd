@@ -5,9 +5,10 @@
 #pragma once
 
 #include "readable.h"
-#include "writable.h"
 #include "transform.h"
-#include "../encoding.h"
+#include "writable.h"
+
+#include <workerd/api/encoding.h>
 
 namespace workerd::api {
 

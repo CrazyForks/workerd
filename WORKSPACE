@@ -1,5 +1,13 @@
 workspace(name = "workerd")
 
+load("@//build/deps:gen/build_deps.bzl", build_deps_gen = "deps_gen")
+
+build_deps_gen()
+
+load("@//build/deps:gen/deps.bzl", "deps_gen")
+
+deps_gen()
+
 # ========================================================================================
 # Bazel basics
 
@@ -8,26 +16,9 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file"
 
 NODE_VERSION = "20.14.0"
 
-http_archive(
-    name = "bazel_skylib",
-    sha256 = "9f38886a40548c6e96c106b752f242130ee11aaa068a56ba7e56f4511f33e4f2",
-    urls = [
-        "https://mirror.bazel.build/github.com/bazelbuild/bazel-skylib/releases/download/1.6.1/bazel-skylib-1.6.1.tar.gz",
-        "https://github.com/bazelbuild/bazel-skylib/releases/download/1.6.1/bazel-skylib-1.6.1.tar.gz",
-    ],
-)
-
 load("@bazel_skylib//:workspace.bzl", "bazel_skylib_workspace")
 
 bazel_skylib_workspace()
-
-# Needed for objc_library starting with bazel 7.
-
-http_archive(
-    name = "build_bazel_apple_support",
-    sha256 = "c31ce8e531b50ef1338392ee29dd3db3689668701ec3237b9c61e26a1937ab07",
-    url = "https://github.com/bazelbuild/apple_support/releases/download/1.16.0/apple_support.1.16.0.tar.gz",
-)
 
 load(
     "@build_bazel_apple_support//lib:repositories.bzl",
@@ -45,23 +36,6 @@ bazel_features_deps()
 # Simple dependencies
 
 http_archive(
-    name = "capnp-cpp",
-    integrity = "sha256-u4TajPQnM3yQIcLUghhNnEUslu0o3q0VdY3jRoPq7yM=",
-    strip_prefix = "capnproto-capnproto-6446b72/c++",
-    type = "tgz",
-    urls = ["https://github.com/capnproto/capnproto/tarball/6446b721a9860eebccf9d3c73b27610491359b5a"],
-)
-
-http_archive(
-    name = "ssl",
-    sha256 = "57261442e663ad0a0dc5c4eae59322440bfce61f1edc4fe4338179a6abc14034",
-    strip_prefix = "google-boringssl-8ae84b5",
-    type = "tgz",
-    # from master-with-bazel branch
-    urls = ["https://github.com/google/boringssl/tarball/8ae84b558b3d3af50a323c7e3800998764e77375"],
-)
-
-http_archive(
     name = "sqlite3",
     build_file = "//:build/BUILD.sqlite3",
     patch_args = ["-p1"],
@@ -73,13 +47,6 @@ http_archive(
     sha256 = "ab9aae38a11b931f35d8d1c6d62826d215579892e6ffbf89f20bdce106a9c8c5",
     strip_prefix = "sqlite-src-3440000",
     url = "https://sqlite.org/2023/sqlite-src-3440000.zip",
-)
-
-http_archive(
-    name = "rules_python",
-    integrity = "sha256-d4quqz5s/VbWgcifXBDXrWv40vGnLeneVbIwgbLTFhg=",
-    strip_prefix = "rules_python-0.34.0",
-    url = "https://github.com/bazelbuild/rules_python/releases/download/0.34.0/rules_python-0.34.0.tar.gz",
 )
 
 load("@rules_python//python:repositories.bzl", "py_repositories", "python_register_toolchains")
@@ -108,9 +75,9 @@ http_archive(
 http_archive(
     name = "ada-url",
     build_file = "//:build/BUILD.ada-url",
-    sha256 = "20b09948cf58362abe4de20b8e709d5041477fb798350fd1a02cde6aad121e08",
+    sha256 = "30d4f4cccbd8b0455a71a2180da95f3a38d085e4a440eb931da94c7272705edc",
     type = "zip",
-    url = "https://github.com/ada-url/ada/releases/download/v2.9.0/singleheader.zip",
+    url = "https://github.com/ada-url/ada/releases/download/v2.9.1/singleheader.zip",
 )
 
 http_archive(
@@ -165,47 +132,6 @@ filegroup(
 )
 
 # ========================================================================================
-# Dawn
-#
-# WebGPU implementation
-
-git_repository(
-    name = "dawn",
-    build_file = "//:build/BUILD.dawn",
-    commit = "5a26bdd62d0f809626214c8a3448a988bcd25736",
-    remote = "https://dawn.googlesource.com/dawn.git",
-    repo_mapping = {
-        "@abseil_cpp": "@com_google_absl",
-    },
-)
-
-http_archive(
-    name = "vulkan_utility_libraries",
-    build_file = "//:build/BUILD.vulkan_utility_libraries",
-    sha256 = "11a51175598c84ba171fd82ba7f1a109ee4133338684d84f6b3c4bbe9ea52a8d",
-    strip_prefix = "KhronosGroup-Vulkan-Utility-Libraries-5b3147a",
-    type = "tgz",
-    url = "https://github.com/KhronosGroup/Vulkan-Utility-Libraries/tarball/5b3147a535e28a48ae760efacdf97b296d9e8c73",
-)
-
-http_archive(
-    name = "vulkan_headers",
-    build_file = "//:build/BUILD.vulkan_headers",
-    sha256 = "559d4bff13acddb58e08bdd862aa6f7fccfda9a97d1799a7f8592e847c723a03",
-    strip_prefix = "KhronosGroup-Vulkan-Headers-aff5071",
-    type = "tgz",
-    url = "https://github.com/KhronosGroup/Vulkan-Headers/tarball/aff5071d4ee6215c60a91d8d983cad91bb25fb57",
-)
-
-http_archive(
-    name = "spirv_headers",
-    sha256 = "c1ef22607cc34489933d987f55b59ad5b3ef98b1f22fc16b2b603de23950aca6",
-    strip_prefix = "KhronosGroup-SPIRV-Headers-88bc5e3",
-    type = "tgz",
-    url = "https://github.com/KhronosGroup/SPIRV-Headers/tarball/88bc5e321c2839707df8b1ab534e243e00744177",
-)
-
-# ========================================================================================
 # tcmalloc
 
 # tcmalloc requires Abseil.
@@ -216,7 +142,7 @@ http_archive(
 #   to confusing compiler errors in tcmalloc in the past.
 git_repository(
     name = "com_google_absl",
-    commit = "9d1552f25c3d9e9114b7d7aed55790570a99bc4d",
+    commit = "ed3733b91e472a1e7a641c1f0c1e6c0ea698e958",
     remote = "https://chromium.googlesource.com/chromium/src/third_party/abseil-cpp.git",
 )
 
@@ -277,96 +203,13 @@ http_archive(
 # ========================================================================================
 # Rust bootstrap
 #
-# workerd uses some Rust libraries, especially lolhtml for implementing HtmlRewriter.
-# Note that lol_html itself is not included here to avoid dependency duplication and simplify
-# the build process. To update the dependency, update the reference commit in
-# rust-deps/BUILD.bazel and run `bazel run //rust-deps:crates_vendor -- --repin`
 
-# Based on https://github.com/bazelbuild/bazel/blob/master/third_party/zlib/BUILD.
-_zlib_build = """
-cc_library(
+git_repository(
     name = "zlib",
-    srcs = glob(["*.c"]),
-    hdrs = glob(["*.h"]),
-    includes = ["."],
-    # Workaround for zlib warnings and mac compilation. Some issues were resolved in v1.3, but there are still implicit function declarations.
-    copts = [
-        "-w",
-        "-Dverbose=-1",
-    ] + select({
-        "@platforms//os:linux": [ "-Wno-implicit-function-declaration" ],
-        "@platforms//os:macos": [ "-Wno-implicit-function-declaration" ],
-        "//conditions:default": [],
-    }),
-    visibility = ["//visibility:public"],
-)
-"""
-
-http_archive(
-    name = "zlib",
-    build_file_content = _zlib_build,
-    sha256 = "38ef96b8dfe510d42707d9c781877914792541133e1870841463bfa73f883e32",
-    strip_prefix = "zlib-1.3.1",
-    # Using the .tar.xz artifact from the release page – for many other dependencies we use a
-    # snapshot based on the tag of a release instead.
-    urls = ["https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.xz"],
-)
-
-http_file(
-    name = "cargo_bazel_linux_x64",
-    executable = True,
-    sha256 = "87a56511eb592f4f118750043e38ad40814f4be20b30f796506de7634aa2d41e",
-    urls = [
-        "https://github.com/bazelbuild/rules_rust/releases/download/0.46.0/cargo-bazel-x86_64-unknown-linux-gnu",
-    ],
-)
-
-http_file(
-    name = "cargo_bazel_linux_arm64",
-    executable = True,
-    sha256 = "490b52bd8407613c3aa69b9e3f52635a2fe7631ccb5c5bea9d8d0bc0adfa6d0f",
-    urls = [
-        "https://github.com/bazelbuild/rules_rust/releases/download/0.42.1/cargo-bazel-aarch64-unknown-linux-gnu",
-    ],
-)
-
-http_file(
-    name = "cargo_bazel_macos_x64",
-    executable = True,
-    sha256 = "cf873df6f03c94b95af567f5b9a6ff3e1528052cc89cabbee5a330e7c94b75c9",
-    urls = [
-        "https://github.com/bazelbuild/rules_rust/releases/download/0.42.1/cargo-bazel-x86_64-apple-darwin",
-    ],
-)
-
-http_file(
-    name = "cargo_bazel_macos_arm64",
-    executable = True,
-    sha256 = "30b01033e7b534c6e1927d9225f52a239a41bad402aac12fb6410683a3daa8b1",
-    urls = [
-        "https://github.com/bazelbuild/rules_rust/releases/download/0.46.0/cargo-bazel-aarch64-apple-darwin",
-    ],
-)
-
-http_file(
-    name = "cargo_bazel_win_x64",
-    downloaded_file_path = "downloaded.exe",  # .exe extension required for Windows to recognise as executable
-    executable = True,
-    sha256 = "dea1f912f7c432cd9f84bd2e7b4ad791e7ccfb0c01a6984ccc6498e0cc8be0a7",
-    urls = [
-        "https://github.com/bazelbuild/rules_rust/releases/download/0.42.1/cargo-bazel-x86_64-pc-windows-msvc.exe",
-    ],
-)
-
-# TODO(cleanup): Bring rules_rust and cargo_bazel back in sync – rules_rust was stuck at an older
-# version due to linker errors but has been upgraded since. Some version mismatch is acceptable here
-# since cargo_bazel is only used to generate build files.
-http_archive(
-    name = "rules_rust",
-    integrity = "sha256-F8U7+AC5MvMtPKGdLLnorVM84cDXKfDRgwd7/dq3rUY=",
-    urls = [
-        "https://github.com/bazelbuild/rules_rust/releases/download/0.46.0/rules_rust-v0.46.0.tar.gz",
-    ],
+    build_file = "//:build/BUILD.zlib",
+    # Must match the version used by v8
+    commit = "d3aea2341cdeaf7e717bc257a59aa7a9407d318a",
+    remote = "https://chromium.googlesource.com/chromium/src/third_party/zlib.git",
 )
 
 load("@rules_rust//rust:repositories.bzl", "rules_rust_dependencies", "rust_register_toolchains")
@@ -377,14 +220,17 @@ rust_register_toolchains(
     edition = "2021",
     # Rust registers wasm targets by default which we don't need, workerd is only built for its native platform.
     extra_target_triples = [],
-    versions = ["1.77.0"],  # LLVM 17
+    versions = ["1.81.0"],  # LLVM 18
 )
 
 load("@rules_rust//crate_universe:repositories.bzl", "crate_universe_dependencies")
 
 crate_universe_dependencies()
 
-load("//rust-deps/crates:crates.bzl", "crate_repositories")
+# Load rust crate dependencies.
+# These could be regenerated from cargo.bzl by using
+# `just update-rust` (consult `just --list` or justfile for more details)
+load("//deps/rust/crates:crates.bzl", "crate_repositories")
 
 crate_repositories()
 
@@ -396,6 +242,23 @@ rust_analyzer_dependencies()
 # Node.js bootstrap
 #
 # workerd uses Node.js scripts for generating TypeScript types.
+
+# TODO(soon): rules_js depends on bazel-lib, which broke on Windows after a dependency binary was
+# deleted. There is a fix available at https://github.com/bazel-contrib/bazel-lib/pull/940, but it
+# is based off of a commit where WORKSPACE dependencies appear to be broken. Create a patch for the
+# latest release build instead. Remove this ASAP once the fix has been merged and rules_js has been
+# updated with the fixed version.
+http_archive(
+    name = "aspect_bazel_lib",
+    patch_args = ["-p1"],
+    patches = [
+        # based on https://github.com/bazel-contrib/bazel-lib/pull/940.
+        "//:patches/bazel-lib/0001-chore-deps-upgrade-to-newest-bsdtar.patch",
+    ],
+    sha256 = "688354ee6beeba7194243d73eb0992b9a12e8edeeeec5b6544f4b531a3112237",
+    strip_prefix = "bazel-lib-2.8.1",
+    url = "https://github.com/aspect-build/bazel-lib/releases/download/v2.8.1/bazel-lib-v2.8.1.tar.gz",
+)
 
 http_archive(
     name = "aspect_rules_js",
@@ -449,6 +312,17 @@ load("@npm//:repositories.bzl", "npm_repositories")
 
 npm_repositories()
 
+load("@aspect_rules_esbuild//esbuild:dependencies.bzl", "rules_esbuild_dependencies")
+
+rules_esbuild_dependencies()
+
+load("@aspect_rules_esbuild//esbuild:repositories.bzl", "esbuild_register_toolchains")
+
+esbuild_register_toolchains(
+    name = "esbuild",
+    esbuild_version = "0.23.0",
+)
+
 # ========================================================================================
 # V8 and its dependencies
 #
@@ -466,7 +340,7 @@ npm_repositories()
 
 http_archive(
     name = "v8",
-    integrity = "sha256-yoLczQj1XEZL4EHVRjAwpVjgr9/q0YlRGnNX47Ke2ws=",
+    integrity = "sha256-OTr3bwOCu50VAtMUd7d1kZXIkT1OoF9+zo9g3E7Vyvo=",
     patch_args = ["-p1"],
     patches = [
         "//:patches/v8/0001-Allow-manually-setting-ValueDeserializer-format-vers.patch",
@@ -487,14 +361,10 @@ http_archive(
         "//:patches/v8/0016-Revert-TracedReference-deref-API-removal.patch",
         "//:patches/v8/0017-Revert-heap-Add-masm-specific-unwinding-annotations-.patch",
         "//:patches/v8/0018-Update-illegal-invocation-error-message-in-v8.patch",
-        # TODO(cleanup): Patches backported from V8 12.9 – adding these fixes a race condition
-        # leading to a segfault in several wasm-related tests under ASan. These are already included
-        # in 12.9 so remove the patches when updating to that version.
-        "//:patches/v8/0019-wasm-Fix-more-code-logging-races.patch",
-        "//:patches/v8/0020-wasm-Remove-destructor-of-LogCodesTask.patch",
+        "//:patches/v8/0019-Implement-cross-request-context-promise-resolve-hand.patch",
     ],
-    strip_prefix = "v8-12.8.374.10",
-    url = "https://github.com/v8/v8/archive/refs/tags/12.8.374.10.tar.gz",
+    strip_prefix = "v8-12.9.202.27",
+    url = "https://github.com/v8/v8/archive/refs/tags/12.9.202.27.tar.gz",
 )
 
 git_repository(
@@ -513,17 +383,9 @@ http_archive(
         "//:patches/perfetto/0001-Rename-ui-build-to-ui-build.sh-to-allow-bazel-build-.patch",
     ],
     repo_mapping = {"@perfetto_dep_zlib": "@zlib"},
-    sha256 = "241cbaddc9ff4e5d1de2d28497fef40b5510e9ca60808815bf4944d0d2f026db",
-    strip_prefix = "perfetto-39.0",
-    url = "https://github.com/google/perfetto/archive/refs/tags/v39.0.tar.gz",
-)
-
-# For use with perfetto
-http_archive(
-    name = "com_google_protobuf",
-    sha256 = "6adf73fd7f90409e479d6ac86529ade2d45f50494c5c10f539226693cb8fe4f7",
-    strip_prefix = "protobuf-3.10.1",
-    url = "https://github.com/protocolbuffers/protobuf/archive/refs/tags/v3.10.1.tar.gz",
+    sha256 = "9bbd38a0f074038bde6ccbcf5f2ff32587eb60faec254932268ecb6f17f18186",
+    strip_prefix = "perfetto-47.0",
+    url = "https://github.com/google/perfetto/archive/refs/tags/v47.0.tar.gz",
 )
 
 # For use with perfetto
@@ -586,21 +448,120 @@ new_local_repository(
     path = "empty",
 )
 
-# rust-based lolhtml dependency, including the API header. See rust-deps for details.
+# rust-based lolhtml dependency, including the API header.
+# Presented as a separate repository to allow overrides.
 new_local_repository(
     name = "com_cloudflare_lol_html",
-    build_file_content = """cc_library(
-        name = "lolhtml",
-        hdrs = ["@workerd//rust-deps:lol_html_api"],
-        deps = ["@workerd//rust-deps"],
-        # TODO(soon): This workaround appears to be needed when linking the rust library - figure
-        # out why and develop a better approach to address this.
-        linkopts = select({
-          "@platforms//os:windows": ["ntdll.lib"],
-          "//conditions:default": [""],
-        }),
-        include_prefix = "c-api/include",
-        strip_include_prefix = "c-api/include",
-        visibility = ["//visibility:public"],)""",
+    build_file = "@workerd//deps/rust:BUILD.lolhtml",
     path = "empty",
+)
+
+# Dev tools
+http_file(
+    name = "buildifier-darwin-arm64",
+    executable = True,
+    integrity = "sha256-Wmr8asegn1RVuguJvZnVriO0F03F3J1sDtXOjKrD+BM=",
+    url = "https://github.com/bazelbuild/buildtools/releases/download/v7.3.1/buildifier-darwin-arm64",
+)
+
+http_file(
+    name = "buildifier-darwin-amd64",
+    executable = True,
+    integrity = "sha256-Wmr8asegn1RVuguJvZnVriO0F03F3J1sDtXOjKrD+BM=",
+    url = "https://github.com/bazelbuild/buildtools/releases/download/v7.3.1/buildifier-darwin-arm64",
+)
+
+http_file(
+    name = "buildifier-linux-arm64",
+    executable = True,
+    integrity = "sha256-C/hsS//69PCO7Xe95bIILkrlA5oR4uiwOYTBc8NKVhw=",
+    url = "https://github.com/bazelbuild/buildtools/releases/download/v7.3.1/buildifier-linux-arm64",
+)
+
+http_file(
+    name = "buildifier-linux-amd64",
+    executable = True,
+    integrity = "sha256-VHTMUSinToBng9VAgfWBZixL6K5lAi9VfpKB7V3IgAk=",
+    url = "https://github.com/bazelbuild/buildtools/releases/download/v7.3.1/buildifier-linux-amd64",
+)
+
+http_file(
+    name = "buildifier-windows-amd64",
+    executable = True,
+    integrity = "sha256-NwzVdgda0pkwqC9d4TLxod5AhMeEqCUUvU2oDIWs9Kg=",
+    url = "https://github.com/bazelbuild/buildtools/releases/download/v7.3.1/buildifier-windows-amd64.exe",
+)
+
+FILE_GROUP = """filegroup(
+	name="file",
+	srcs=["**/*"])"""
+
+http_archive(
+    name = "ruff-darwin-arm64",
+    build_file_content = FILE_GROUP,
+    integrity = "sha256-KbGnLDXu1bIkD/Nl4fRdB7wMQLkzGhGcK1nMpEwPMi4=",
+    strip_prefix = "ruff-aarch64-apple-darwin",
+    url = "https://github.com/astral-sh/ruff/releases/download/0.6.7/ruff-aarch64-apple-darwin.tar.gz",
+)
+
+http_archive(
+    name = "ruff-darwin-amd64",
+    build_file_content = FILE_GROUP,
+    integrity = "sha256-W3JL0sldkm6kbaB9+mrFVoY32wR0CDhpi7SxkJ2Oug0=",
+    strip_prefix = "ruff-x86_64-apple-darwin",
+    url = "https://github.com/astral-sh/ruff/releases/download/0.6.7/ruff-x86_64-apple-darwin.tar.gz",
+)
+
+http_archive(
+    name = "ruff-linux-arm64",
+    build_file_content = FILE_GROUP,
+    integrity = "sha256-7nBZdr686PdPmCFa2EN65OHgmDCfqB3ygFaXVgUDRuM=",
+    strip_prefix = "ruff-aarch64-unknown-linux-gnu",
+    url = "https://github.com/astral-sh/ruff/releases/download/0.6.7/ruff-aarch64-unknown-linux-gnu.tar.gz",
+)
+
+http_archive(
+    name = "ruff-linux-amd64",
+    build_file_content = FILE_GROUP,
+    integrity = "sha256-Uu1+NMFYCfMT4/jtQoH+Uj5+XwZn57+ZWIhbfm8icKg=",
+    strip_prefix = "ruff-x86_64-unknown-linux-gnu",
+    url = "https://github.com/astral-sh/ruff/releases/download/0.6.7/ruff-x86_64-unknown-linux-gnu.tar.gz",
+)
+
+http_archive(
+    name = "ruff-windows-amd64",
+    build_file_content = FILE_GROUP,
+    integrity = "sha256-H2yX4kuLyNdBrkRPhTr61FQqJRyiKeLq4TnMmKE0t2A=",
+    url = "https://github.com/astral-sh/ruff/releases/download/0.6.7/ruff-x86_64-pc-windows-msvc.zip",
+)
+
+# clang-format static binary builds via GH Actions: https://github.com/npaun/bins/blob/master/.github/workflows/llvm.yml
+# TODO(soon): Move this workflow to a repo in the cloudflare GH organization
+
+http_file(
+    name = "clang-format-darwin-arm64",
+    executable = True,
+    integrity = "sha256-1hG7AcfgGL+IBrSCEhD9ed6pvIpZMdXMdhCDGkqzhpA=",
+    url = "https://github.com/npaun/bins/releases/download/llvm-18.1.8/llvm-18.1.8-darwin-arm64-clang-format",
+)
+
+http_file(
+    name = "clang-format-linux-arm64",
+    executable = True,
+    integrity = "sha256-No7G08x7VJ+CkjuhyohcTWymPPm0QUE4EZlkp9Of5jM=",
+    url = "https://github.com/npaun/bins/releases/download/llvm-18.1.8/llvm-18.1.8-linux-arm64-clang-format",
+)
+
+http_file(
+    name = "clang-format-linux-amd64",
+    executable = True,
+    integrity = "sha256-iCbaPg60x60eA9ZIWmSdFva/RD9xOBcJLUwSRK8Gxzk=",
+    url = "https://github.com/npaun/bins/releases/download/llvm-18.1.8/llvm-18.1.8-linux-amd64-clang-format",
+)
+
+http_file(
+    name = "clang-format-windows-amd64",
+    executable = True,
+    integrity = "sha256-4V2KXVoX5Ny1J7ABfVRx0nAHpAGegykhzac7zW3nK0k=",
+    url = "https://github.com/npaun/bins/releases/download/llvm-18.1.8/llvm-18.1.8-windows-amd64-clang-format.exe",
 )

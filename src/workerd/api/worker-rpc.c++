@@ -2,11 +2,12 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
+#include <workerd/api/actor-state.h>
+#include <workerd/api/global-scope.h>
 #include <workerd/api/worker-rpc.h>
 #include <workerd/io/features.h>
-#include <workerd/api/global-scope.h>
-#include <workerd/api/actor-state.h>
 #include <workerd/jsg/ser.h>
+
 #include <capnp/membrane.h>
 
 namespace workerd::api {
@@ -227,7 +228,11 @@ jsg::JsValue deserializeRpcReturnValue(
     jsg::Lock& js, rpc::JsRpcTarget::CallResults::Reader callResults, StreamSinkImpl& streamSink) {
   auto [value, disposalGroup, _] = deserializeJsValue(js, callResults.getResult(), streamSink);
 
-  if (callResults.hasCallPipeline()) {
+  // If the object had a disposer on the callee side, it will run when we discard the callPipeline,
+  // so attach that to the disposal group on the caller side. If the returned object did NOT have
+  // a disposer then we should discard callPipeline so that we don't hold open the callee's
+  // context for no reason.
+  if (callResults.getHasDisposer()) {
     disposalGroup->setCallPipeline(
         IoContext::current().addObject(kj::heap(callResults.getCallPipeline())));
   }
@@ -241,7 +246,7 @@ jsg::JsValue deserializeRpcReturnValue(
       v8::Local<v8::Value> func = js.wrapSimpleFunction(js.v8Context(),
           [disposalGroup = kj::mv(disposalGroup)](jsg::Lock&,
               const v8::FunctionCallbackInfo<v8::Value>&) mutable { disposalGroup->disposeAll(); });
-      obj.set(js, js.symbolDispose(), jsg::JsValue(func));
+      obj.setNonEnumerable(js, js.symbolDispose(), jsg::JsValue(func));
     }
   } else {
     // Result wasn't an object, so it must not contain any stubs.
@@ -501,17 +506,18 @@ JsRpcPromiseAndPipleine callImpl(jsg::Lock& js,
       kj::Maybe<StreamSinkFulfiller> paramsStreamSinkFulfiller;
 
       KJ_IF_SOME(args, maybeArgs) {
-        // This is a function call with arguments.
-        kj::Vector<jsg::JsValue> argv(args.Length());
-        for (int n = 0; n < args.Length(); n++) {
-          argv.add(jsg::JsValue(args[n]));
-        }
-
         // If we have arguments, serialize them.
         // Note that we may fail to serialize some element, in which case this will throw back to
         // JS.
-        if (argv.size() > 0) {
-          serializeJsValue(js, js.arr(argv.asPtr()), [&](capnp::MessageSize hint) {
+        if (args.Length() > 0) {
+          // This is a function call with arguments.
+          v8::LocalVector<v8::Value> argv(js.v8Isolate, args.Length());
+          for (int n = 0; n < args.Length(); n++) {
+            argv[n] = args[n];
+          }
+          auto arr = v8::Array::New(js.v8Isolate, argv.data(), argv.size());
+
+          serializeJsValue(js, jsg::JsValue(arr), [&](capnp::MessageSize hint) {
             // TODO(perf): Actually use the size hint.
             return builder.getOperation().initCallWithArgs();
           }, [&]() -> rpc::JsValue::StreamSink::Client {
@@ -899,7 +905,10 @@ struct SingleStub {};
 
 // The value is not a type that supports pipelining. It may still be serializable, and it could
 // even contain stubs (e.g. in a Map).
-struct NonPipelinable {};
+struct NonPipelinable {
+  // callPipeline to return just for error-handling purposes.
+  rpc::JsRpcTarget::Client errorPipeline;
+};
 
 using Result = kj::OneOf<Object, SingleStub, NonPipelinable>;
 };  // namespace MakeCallPipeline
@@ -1036,8 +1045,9 @@ public:
               KJ_ASSERT(external.isRpcTarget());
               results.setCallPipeline(external.getRpcTarget());
             }
-            KJ_CASE_ONEOF(obj, MakeCallPipeline::NonPipelinable) {
-              // No callPipeline is needed.
+            KJ_CASE_ONEOF(nonPipelinable, MakeCallPipeline::NonPipelinable) {
+              results.setCallPipeline(kj::mv(nonPipelinable.errorPipeline));
+              // leave hasDisposer false
             }
           }
 
@@ -1275,14 +1285,15 @@ private:
       auto args = KJ_REQUIRE_NONNULL(
           value.tryCast<jsg::JsArray>(), "expected JsArray when deserializing arguments.");
       // Call() expects a `Local<Value> []`... so we populate an array.
-      KJ_STACK_ARRAY(v8::Local<v8::Value>, arguments, args.size(), 8, 8);
+
+      v8::LocalVector<v8::Value> arguments(js.v8Isolate, args.size());
       for (size_t i = 0; i < args.size(); ++i) {
         arguments[i] = args.get(js, i);
       }
 
       InvocationResult result{
         .returnValue =
-            jsg::check(fn->Call(js.v8Context(), thisArg, args.size(), arguments.begin())),
+            jsg::check(fn->Call(js.v8Context(), thisArg, arguments.size(), arguments.data())),
         .streamSink = kj::mv(streamSink),
       };
       if (!disposalGroup->empty()) {
@@ -1361,7 +1372,7 @@ private:
         "arguments, the server must use class-based syntax (extending WorkerEntrypoint) "
         "instead.");
 
-    KJ_STACK_ARRAY(v8::Local<v8::Value>, arguments, kj::max(argCountFromClient + 2, arity), 8, 8);
+    v8::LocalVector<v8::Value> arguments(js.v8Isolate, kj::max(argCountFromClient + 2, arity));
 
     for (auto i: kj::zeroTo(arity - 2)) {
       if (argCountFromClient > i) {
@@ -1382,7 +1393,7 @@ private:
 
     return {
       .returnValue =
-          jsg::check(fn->Call(js.v8Context(), thisArg, arguments.size(), arguments.begin())),
+          jsg::check(fn->Call(js.v8Context(), thisArg, arguments.size(), arguments.data())),
       .paramDisposalGroup = kj::mv(paramDisposalGroup),
       .streamSink = kj::mv(streamSink),
     };
@@ -1495,8 +1506,14 @@ static rpc::JsRpcTarget::Client makeJsRpcTargetForSingleLoopbackCall(
 
 static MakeCallPipeline::Result makeCallPipeline(jsg::Lock& js, jsg::JsValue value) {
   return js.withinHandleScope([&]() -> MakeCallPipeline::Result {
-    jsg::JsObject obj = KJ_UNWRAP_OR(
-        value.tryCast<jsg::JsObject>(), { return MakeCallPipeline::NonPipelinable(); });
+    jsg::JsObject obj = KJ_UNWRAP_OR(value.tryCast<jsg::JsObject>(), {
+      // Primitive value. Return a fake pipeline just so that we get nice errors if someone tries
+      // to pipeline on it. (If we return null, we'll get "called null capability" out of
+      // Cap'n Proto, which will be treated as an internal error.)
+      return (MakeCallPipeline::NonPipelinable{
+        .errorPipeline = rpc::JsRpcTarget::Client(
+            kj::heap<TransientJsRpcTarget>(js, IoContext::current(), js.obj(), kj::none, true))});
+    });
 
     if (obj.getPrototype(js) == js.obj().getPrototype(js)) {
       // It's a plain object.
@@ -1525,9 +1542,12 @@ static MakeCallPipeline::Result makeCallPipeline(jsg::Lock& js, jsg::JsValue val
       return MakeCallPipeline::SingleStub();
     } else {
       // Not an RPC object. Could be a String or other serializable types that derive from Object.
+      // Similar to primitive types, we return a fake pipeline for error-handling reasons.
       // TODO(soon): What if someone returns e.g. a Map with a disposer on it? Should we honor that
       //   disposer?
-      return MakeCallPipeline::NonPipelinable();
+      return MakeCallPipeline::NonPipelinable{
+        .errorPipeline = rpc::JsRpcTarget::Client(
+            kj::heap<TransientJsRpcTarget>(js, IoContext::current(), js.obj(), kj::none, true))};
     }
   });
 }
@@ -1809,7 +1829,8 @@ jsg::Ref<DurableObjectBase> DurableObjectBase::constructor(
   return jsg::alloc<DurableObjectBase>();
 }
 
-jsg::Ref<Workflow> Workflow::constructor(const v8::FunctionCallbackInfo<v8::Value>& args,
+jsg::Ref<WorkflowEntrypoint> WorkflowEntrypoint::constructor(
+    const v8::FunctionCallbackInfo<v8::Value>& args,
     jsg::Ref<ExecutionContext> ctx,
     jsg::JsObject env) {
   // HACK: We take `FunctionCallbackInfo` mostly so that we can set properties directly on
@@ -1820,7 +1841,7 @@ jsg::Ref<Workflow> Workflow::constructor(const v8::FunctionCallbackInfo<v8::Valu
   jsg::JsObject self(args.This());
   self.set(js, "ctx", jsg::JsValue(args[0]));
   self.set(js, "env", jsg::JsValue(args[1]));
-  return jsg::alloc<Workflow>();
+  return jsg::alloc<WorkflowEntrypoint>();
 }
 
 };  // namespace workerd::api

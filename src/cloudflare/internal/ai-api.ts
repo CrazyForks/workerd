@@ -20,9 +20,11 @@ export type SessionOptions = {
 
 export type GatewayOptions = {
   id: string;
+  cacheKey?: string;
   cacheTtl?: number;
   skipCache?: boolean;
   metadata?: Record<string, number | string | boolean | null | bigint>;
+  collectLog?: boolean;
 };
 
 export type AiOptions = {
@@ -53,6 +55,7 @@ export class Ai {
   private logs: Array<string> = [];
   private options: AiOptions = {};
   public lastRequestId: string | null = null;
+  public aiGatewayLogId: string | null = null;
 
   public constructor(fetcher: Fetcher) {
     this.fetcher = fetcher;
@@ -79,7 +82,7 @@ export class Ai {
       extraHeaders,
       sessionOptions,
       ...object
-    }): object => object)(this.options || {});
+    }): object => object)(this.options);
 
     const body = JSON.stringify({
       inputs,
@@ -90,8 +93,8 @@ export class Ai {
       method: 'POST',
       body: body,
       headers: {
-        ...(this.options?.sessionOptions?.extraHeaders || {}),
-        ...(this.options?.extraHeaders || {}),
+        ...(this.options.sessionOptions?.extraHeaders || {}),
+        ...(this.options.extraHeaders || {}),
         'content-type': 'application/json',
         'cf-consn-sdk-version': '2.0.0',
         'cf-consn-model-id': `${this.options.prefix ? `${this.options.prefix}:` : ''}${model}`,
@@ -104,6 +107,7 @@ export class Ai {
     );
 
     this.lastRequestId = res.headers.get('cf-ai-req-id');
+    this.aiGatewayLogId = res.headers.get('cf-aig-log-id');
 
     if (inputs['stream']) {
       if (!res.ok) {

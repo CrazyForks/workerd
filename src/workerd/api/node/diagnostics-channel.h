@@ -1,7 +1,8 @@
 #pragma once
 
-#include "async-hooks.h"
+#include <workerd/api/node/async-hooks.h>
 #include <workerd/jsg/jsg.h>
+
 #include <kj/map.h>
 #include <kj/table.h>
 

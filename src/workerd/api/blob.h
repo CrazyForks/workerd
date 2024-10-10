@@ -4,8 +4,8 @@
 
 #pragma once
 
-#include <workerd/jsg/jsg.h>
 #include <workerd/io/compatibility-date.capnp.h>
+#include <workerd/jsg/jsg.h>
 
 namespace workerd::api {
 
@@ -104,8 +104,7 @@ private:
       KJ_CASE_ONEOF(b, jsg::Ref<Blob>) {
         visitor.visit(b);
       }
-      KJ_CASE_ONEOF(b, kj::Array<kj::byte>) {
-      }
+      KJ_CASE_ONEOF(b, kj::Array<kj::byte>) {}
     }
   }
 

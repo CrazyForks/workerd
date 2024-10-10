@@ -5,23 +5,16 @@
 
 #include "i18n.h"
 
+#include "simdutf.h"
+
 #include <workerd/jsg/exception.h>
 
-#include <unicode/putil.h>
-#include <unicode/uchar.h>
-#include <unicode/uclean.h>
 #include <unicode/ucnv.h>
-#include <unicode/udata.h>
 #include <unicode/uidna.h>
 #include <unicode/urename.h>
-#include <unicode/ustring.h>
-#include <unicode/utf16.h>
-#include <unicode/utf8.h>
 #include <unicode/utypes.h>
 #include <unicode/uvernum.h>
 #include <unicode/uversion.h>
-
-#include "simdutf.h"
 
 namespace workerd::api::node {
 
@@ -31,15 +24,6 @@ namespace {
 
 // An isolate has a 128mb memory limit.
 const int ISOLATE_LIMIT = 134217728;
-
-struct ConverterDisposer: public kj::Disposer {
-  static const ConverterDisposer INSTANCE;
-  void disposeImpl(void* pointer) const override {
-    ucnv_close(reinterpret_cast<UConverter*>(pointer));
-  }
-};
-
-const ConverterDisposer ConverterDisposer::INSTANCE;
 
 const char* getEncodingName(Encoding input) {
   switch (input) {
@@ -181,7 +165,7 @@ Converter::Converter(Encoding encoding, kj::StringPtr substitute) {
   auto name = getEncodingName(encoding);
   auto conv = ucnv_open(name, &status);
   JSG_REQUIRE(U_SUCCESS(status), Error, "Failed to initialize converter");
-  conv_ = kj::Own<UConverter>(conv, ConverterDisposer::INSTANCE);
+  conv_ = kj::disposeWith<ucnv_close>(conv);
   setSubstituteChars(substitute);
 }
 
@@ -215,14 +199,6 @@ void Converter::setSubstituteChars(kj::StringPtr sub) {
 
 kj::Array<kj::byte> transcode(
     kj::ArrayPtr<kj::byte> source, Encoding fromEncoding, Encoding toEncoding) {
-  // Optimization:
-  // If both encodings are same, we just return a copy of the buffer.
-  if (fromEncoding == toEncoding) {
-    auto destbuf = kj::heapArray<kj::byte>(source.size());
-    destbuf.asPtr().copyFrom(source);
-    return destbuf.asBytes().attach(kj::mv(destbuf));
-  }
-
   TranscodeImpl transcode_function = &TranscodeDefault;
   switch (fromEncoding) {
     case Encoding::ASCII:

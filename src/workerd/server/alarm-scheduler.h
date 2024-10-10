@@ -4,17 +4,17 @@
 
 #pragma once
 
+#include <workerd/io/worker-interface.h>
+#include <workerd/util/sqlite.h>
+
+#include <kj/async.h>
 #include <kj/common.h>
 #include <kj/debug.h>
-#include <kj/async.h>
+#include <kj/map.h>
 #include <kj/time.h>
 #include <kj/timer.h>
-#include <kj/map.h>
 
 #include <random>
-
-#include <workerd/util/sqlite.h>
-#include <workerd/io/worker-interface.h>
 
 namespace workerd::server {
 
@@ -62,7 +62,7 @@ public:
   using GetActorFn = kj::Function<kj::Own<WorkerInterface>(kj::String)>;
 
   AlarmScheduler(
-      const kj::Clock& clock, kj::Timer& timer, const SqliteDatabase::Vfs& vfs, kj::PathPtr path);
+      const kj::Clock& clock, kj::Timer& timer, const SqliteDatabase::Vfs& vfs, kj::Path path);
 
   kj::Maybe<kj::Date> getAlarm(ActorKey actor);
   bool setAlarm(ActorKey actor, kj::Date scheduledTime);

@@ -2,8 +2,11 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 #include "async-context.h"
+
 #include "jsg.h"
+
 #include <workerd/jsg/memory.h>
+
 #include <v8.h>
 
 namespace workerd::jsg {
@@ -84,13 +87,13 @@ v8::Local<v8::Function> AsyncContextFrame::wrapSnapshot(Lock& js) {
             auto context = js.v8Context();
             JSG_REQUIRE(args[0]->IsFunction(), TypeError, "The first argument must be a function");
             auto fn = args[0].As<v8::Function>();
-            kj::Vector<v8::Local<v8::Value>> argv(args.Length() - 1);
+            v8::LocalVector<v8::Value> argv(js.v8Isolate, args.Length() - 1);
             for (int n = 1; n < args.Length(); n++) {
-            argv.add(args[n]);
+            argv[n - 1] = args[n];
             }
 
             AsyncContextFrame::Scope scope(js, frame);
-            return check(fn->Call(context, context->Global(), argv.size(), argv.begin()));
+            return check(fn->Call(context, context->Global(), argv.size(), argv.data()));
           }));
 }
 
@@ -104,16 +107,15 @@ v8::Local<v8::Function> AsyncContextFrame::wrap(
               fn = js.v8Ref(fn)),
           (frame, thisArg, fn), (Lock& js, const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto function = fn.getHandle(js);
-            auto context = js.v8Context();
 
-            kj::Vector<v8::Local<v8::Value>> argv(args.Length());
+            v8::LocalVector<v8::Value> argv(js.v8Isolate, args.Length());
             for (int n = 0; n < args.Length(); n++) {
-            argv.add(args[n]);
+            argv[n] = args[n];
             }
 
             AsyncContextFrame::Scope scope(js, *frame.get());
             return check(
-                function->Call(context, thisArg.getHandle(js), args.Length(), argv.begin()));
+                function->Call(js.v8Context(), thisArg.getHandle(js), argv.size(), argv.data()));
           }));
 }
 
@@ -126,16 +128,15 @@ v8::Local<v8::Function> AsyncContextFrame::wrapRoot(
           (thisArg = js.v8Ref(thisArg.orDefault(context->Global())), fn = js.v8Ref(fn)),
           (thisArg, fn), (Lock& js, const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto function = fn.getHandle(js);
-            auto context = js.v8Context();
 
-            kj::Vector<v8::Local<v8::Value>> argv(args.Length());
+            v8::LocalVector<v8::Value> argv(js.v8Isolate, args.Length());
             for (int n = 0; n < args.Length(); n++) {
-            argv.add(args[n]);
+            argv[n] = args[n];
             }
 
             AsyncContextFrame::Scope scope(js, kj::none);
             return check(
-                function->Call(context, thisArg.getHandle(js), args.Length(), argv.begin()));
+                function->Call(js.v8Context(), thisArg.getHandle(js), argv.size(), argv.data()));
           }));
 }
 

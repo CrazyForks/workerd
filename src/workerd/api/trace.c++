@@ -9,11 +9,12 @@
 #include <workerd/api/util.h>
 #include <workerd/io/io-context.h>
 #include <workerd/jsg/ser.h>
-#include <capnp/schema.h>
-#include <workerd/util/thread-scopes.h>
 #include <workerd/util/own-util.h>
-#include <workerd/util/uuid.h>
+#include <workerd/util/thread-scopes.h>
 #include <workerd/util/uncaught-exception-source.h>
+#include <workerd/util/uuid.h>
+
+#include <capnp/schema.h>
 
 namespace workerd::api {
 
@@ -73,7 +74,15 @@ jsg::V8Ref<v8::Object> getTraceLogMessage(jsg::Lock& js, const Trace::Log& log) 
 }
 
 kj::Array<jsg::Ref<TraceLog>> getTraceLogs(jsg::Lock& js, const Trace& trace) {
-  return KJ_MAP(x, trace.logs) -> jsg::Ref<TraceLog> { return jsg::alloc<TraceLog>(js, trace, x); };
+  auto builder = kj::heapArrayBuilder<jsg::Ref<TraceLog>>(trace.logs.size() + trace.spans.size());
+  for (auto i: kj::indices(trace.logs)) {
+    builder.add(jsg::alloc<TraceLog>(js, trace, trace.logs[i]));
+  }
+  // Add spans represented as logs to the logs object.
+  for (auto i: kj::indices(trace.spans)) {
+    builder.add(jsg::alloc<TraceLog>(js, trace, trace.spans[i]));
+  }
+  return builder.finish();
 }
 
 kj::Array<jsg::Ref<TraceDiagnosticChannelEvent>> getTraceDiagnosticChannelEvents(
@@ -602,7 +611,7 @@ kj::Promise<void> sendTracesToExportedHandler(kj::Own<IoContext::IncomingRequest
       jsg::AsyncContextFrame::StorageScope traceScope = context.makeAsyncTraceScope(lock);
 
       auto handler = lock.getExportedHandler(entrypointName, context.getActor());
-      lock.getGlobalScope().sendTraces(traces, lock, handler);
+      return lock.getGlobalScope().sendTraces(traces, lock, handler);
     });
   } catch (kj::Exception e) {
     // TODO(someday): We only report sendTraces() as failed for metrics/logging if the initial
@@ -645,11 +654,10 @@ auto TraceCustomEventImpl::sendRpc(capnp::HttpOverCapnpFactory& httpOverCapnpFac
     traces[i]->copyTo(out[i]);
   }
 
-  waitUntilTasks.add(req.send().ignoreResult());
-
-  // As long as we sent it, we consider the result to be okay.
-  co_return Result{
-    .outcome = workerd::EventOutcome::OK,
+  auto resp = co_await req.send();
+  auto respResult = resp.getResult();
+  co_return WorkerInterface::CustomEvent::Result{
+    .outcome = respResult.getOutcome(),
   };
 }
 

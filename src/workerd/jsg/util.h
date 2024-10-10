@@ -7,13 +7,15 @@
 //
 // This file contains misc utility functions used elsewhere.
 
-#include <kj/debug.h>
-#include <kj/string.h>
-#include <kj/exception.h>
-#include <v8.h>
-#include <typeinfo>
-
 #include <workerd/util/sentry.h>
+
+#include <v8.h>
+
+#include <kj/debug.h>
+#include <kj/exception.h>
+#include <kj/string.h>
+
+#include <typeinfo>
 
 namespace workerd::jsg {
 
@@ -43,6 +45,7 @@ private:
 
 bool getCaptureThrowsAsRejections(v8::Isolate* isolate);
 bool getCommonJsExportDefault(v8::Isolate* isolate);
+bool getShouldSetToStringTag(v8::Isolate* isolate);
 
 kj::String fullyQualifiedTypeName(const std::type_info& type);
 kj::String typeName(const std::type_info& type);
@@ -475,5 +478,11 @@ struct Unimplemented {};
 // Use to mark APIs that are not just unimplemented, but that we don't plan to implement, e.g.
 // standard ServiceWorker APIs that don't make sense for Workers.
 using WontImplement = Unimplemented;
+
+// ======================================================================================
+// Node.js Compat
+
+kj::Maybe<kj::String> checkNodeSpecifier(kj::StringPtr specifier);
+bool isNodeJsCompatEnabled(jsg::Lock& js);
 
 }  // namespace workerd::jsg

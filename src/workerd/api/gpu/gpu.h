@@ -26,9 +26,11 @@
 #include "gpu-texture-view.h"
 #include "gpu-texture.h"
 #include "gpu-utils.h"
+
+#include <workerd/jsg/jsg.h>
+
 #include <dawn/native/DawnNative.h>
 #include <webgpu/webgpu_cpp.h>
-#include <workerd/jsg/jsg.h>
 
 // Very experimental initial webgpu support based on the Dawn library.
 namespace workerd::api::gpu {

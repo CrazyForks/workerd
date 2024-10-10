@@ -4,17 +4,19 @@
 
 #pragma once
 
+#include <workerd/io/outcome.capnp.h>
+#include <workerd/io/worker-interface.capnp.h>
+#include <workerd/jsg/memory.h>
+#include <workerd/util/own-util.h>
+#include <workerd/util/weak-refs.h>
+
 #include <kj/async.h>
+#include <kj/map.h>
 #include <kj/one-of.h>
 #include <kj/refcount.h>
 #include <kj/string.h>
 #include <kj/time.h>
 #include <kj/vector.h>
-#include <kj/map.h>
-#include <workerd/io/outcome.capnp.h>
-#include <workerd/io/worker-interface.capnp.h>
-#include <workerd/util/own-util.h>
-#include <workerd/jsg/memory.h>
 
 namespace kj {
 enum class HttpMethod;
@@ -34,6 +36,8 @@ enum class PipelineLogLevel {
   NONE,
   FULL
 };
+
+struct Span;
 
 // TODO(someday): See if we can merge similar code concepts...  Trace fills a role similar to
 // MetricsCollector::Reporter::StageEvent, and Tracer fills a role similar to
@@ -289,6 +293,8 @@ public:
   kj::Maybe<kj::String> entrypoint;
 
   kj::Vector<Log> logs;
+  // TODO(o11y): Convert this to actually store spans.
+  kj::Vector<Log> spans;
   // A request's trace can have multiple exceptions due to separate request/waitUntil tasks.
   kj::Vector<Exception> exceptions;
 
@@ -308,7 +314,7 @@ public:
   // Trace data is recorded outside of the JS heap.  To avoid DoS, we keep an estimate of trace
   // data size, and we stop recording if too much is used.
   size_t bytesUsed = 0;
-  // TODO(someday): Eventually, want to capture: customer-facing spans, metrics, user data
+  size_t numSpans = 0;
 
   // Copy content from this trace into `builder`.
   void copyTo(rpc::Trace::Builder builder);
@@ -344,6 +350,7 @@ public:
     return kj::refcounted<PipelineTracer>(kj::addRef(*this));
   }
 
+  // Makes a tracer for a worker stage.
   kj::Own<WorkerTracer> makeWorkerTracer(PipelineLogLevel pipelineLogLevel,
       kj::Maybe<kj::String> scriptId,
       kj::Maybe<kj::String> stableId,
@@ -352,7 +359,10 @@ public:
       kj::Maybe<kj::String> dispatchNamespace,
       kj::Array<kj::String> scriptTags,
       kj::Maybe<kj::String> entrypoint);
-  // Makes a tracer for a worker stage.
+
+  // Adds a trace from the contents of `reader` this is used in sharded workers to send traces back
+  // to the host where tracing was initiated.
+  void addTrace(rpc::Trace::Reader reader);
 
 private:
   kj::Vector<kj::Own<Trace>> traces;
@@ -373,10 +383,17 @@ public:
       kj::Own<Trace> trace,
       PipelineLogLevel pipelineLogLevel);
   explicit WorkerTracer(PipelineLogLevel pipelineLogLevel);
+  ~WorkerTracer() {
+    self->invalidate();
+  }
   KJ_DISALLOW_COPY_AND_MOVE(WorkerTracer);
 
   // Adds log line to trace.  For Spectre, timestamp should only be as accurate as JS Date.now().
-  void log(kj::Date timestamp, LogLevel logLevel, kj::String message);
+  // The isSpan parameter allows for logging spans, which will be emitted after regular logs. There
+  // can be at most MAX_LIME_SPANS spans in a trace.
+  void log(kj::Date timestamp, LogLevel logLevel, kj::String message, bool isSpan = false);
+  // Add a span, which will be represented as a log.
+  void addSpan(const Span& span, kj::String spanContext);
 
   // TODO(soon): Eventually:
   //void setMetrics(...) // Or get from MetricsCollector::Request directly?
@@ -408,6 +425,10 @@ public:
   // parent process after receiving a trace from a process sandbox.
   void setTrace(rpc::Trace::Reader reader);
 
+  kj::Own<WeakRef<WorkerTracer>> addWeakRef() {
+    return self->addRef();
+  }
+
 private:
   PipelineLogLevel pipelineLogLevel;
   kj::Own<Trace> trace;
@@ -415,6 +436,12 @@ private:
   // own an instance of the pipeline to make sure it doesn't get destroyed
   // before we're finished tracing
   kj::Maybe<kj::Own<PipelineTracer>> parentPipeline;
+  // A weak reference for the internal span submitter. We use this so that the span submitter can
+  // add spans while the tracer exists, but does not artifically prolong the lifetime of the tracer
+  // which would interfere with span submission (traces get submitted when the worker returns its
+  // response, but with e.g. waitUntil() the worker can still be performing tasks afterwards so the
+  // span submitter may exist for longer than the tracer).
+  kj::Own<WeakRef<WorkerTracer>> self;
 };
 
 // =======================================================================================
@@ -434,10 +461,9 @@ inline kj::String truncateScriptId(kj::StringPtr id) {
 //   is currently designed to feed tracing of the Workers Runtime itself for the benefit of the
 //   developers of the runtime.
 //
-//   However, we might potentially want to give trace workers some access to span tracing as well.
-//   But, that hasn't been designed yet, and it's not clear if that would be based on the same
-//   concept of spans or completely separate. In the latter case, these classes should probably
-//   move to a different header.
+//   We might potentially want to give trace workers some access to span tracing as well, but with
+//   that the trace worker and span interfaces should still be largely independent of each other;
+//   separate span tracing into a separate header.
 
 class SpanBuilder;
 class SpanObserver;
@@ -519,8 +545,6 @@ public:
 
 private:
   kj::Maybe<kj::Own<SpanObserver>> observer;
-
-  friend class SpanBuilder;
 };
 
 // Interface for writing a span. Essentially, this is a mutable interface to a `Span` object,
@@ -640,5 +664,61 @@ inline SpanBuilder SpanBuilder::newChild(kj::ConstString operationName, kj::Date
   return SpanBuilder(observer.map([](kj::Own<SpanObserver>& obs) { return obs->newChild(); }),
       kj::mv(operationName), startTime);
 }
+
+// TraceContext to keep track of user tracing/existing tracing better
+// TODO(o11y): When creating lime child spans, verify that operationName is within a set of
+// supported operations. This is important to avoid adding spans to the wrong tracing system.
+
+// Interface to track trace context including both Jaeger and Lime spans.
+// TODO(o11y): Consider fleshing this out to make it a proper class, support adding tags/child spans
+// to both,... We expect that tracking lime spans will not needed in all places where we have the
+// existing spans, so synergies will likely be limited.
+struct TraceContext {
+  TraceContext(SpanBuilder span, SpanBuilder limeSpan)
+      : span(kj::mv(span)),
+        limeSpan(kj::mv(limeSpan)) {}
+  TraceContext(TraceContext&& other) = default;
+  TraceContext& operator=(TraceContext&& other) = default;
+  KJ_DISALLOW_COPY(TraceContext);
+
+  SpanBuilder span;
+  SpanBuilder limeSpan;
+};
+
+// TraceContext variant tracking span parents instead. This is useful for code interacting with
+// IoChannelFactory::SubrequestMetadata, which often needs to pass through both spans together
+// without modifying them. In particular, add functions like newLimeChild() here to make it easier
+// to add a span for the right parent.
+struct TraceParentContext {
+  TraceParentContext(TraceContext& tracing)
+      : parentSpan(tracing.span),
+        limeParentSpan(tracing.limeSpan) {}
+  TraceParentContext(SpanParent span, SpanParent limeSpan)
+      : parentSpan(kj::mv(span)),
+        limeParentSpan(kj::mv(limeSpan)) {}
+  TraceParentContext(TraceParentContext&& other) = default;
+  TraceParentContext& operator=(TraceParentContext&& other) = default;
+  KJ_DISALLOW_COPY(TraceParentContext);
+
+  SpanParent parentSpan;
+  SpanParent limeParentSpan;
+};
+
+// RAII object that measures the time duration over its lifetime. It tags this duration onto a
+// given request span using a specified tag name. Ideal for automatically tracking and logging
+// execution times within a scoped block.
+class ScopedDurationTagger {
+public:
+  explicit ScopedDurationTagger(
+      SpanBuilder& span, kj::ConstString key, const kj::MonotonicClock& timer);
+  ~ScopedDurationTagger() noexcept(false);
+  KJ_DISALLOW_COPY_AND_MOVE(ScopedDurationTagger);
+
+private:
+  SpanBuilder& span;
+  kj::ConstString key;
+  const kj::MonotonicClock& timer;
+  const kj::TimePoint startTime;
+};
 
 }  // namespace workerd

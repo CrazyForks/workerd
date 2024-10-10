@@ -4,8 +4,9 @@
 
 #pragma once
 
-#include <workerd/jsg/jsg.h>
 #include "http.h"
+
+#include <workerd/jsg/jsg.h>
 
 namespace workerd::api {
 
@@ -86,7 +87,7 @@ private:
   kj::Maybe<kj::String> cacheName;
 
   kj::Own<kj::HttpClient> getHttpClient(
-      IoContext& context, kj::Maybe<kj::String> cfBlobJson, kj::ConstString operationName);
+      IoContext& context, kj::Maybe<kj::String> cfBlobJson, kj::LiteralStringConst operationName);
 };
 
 // =======================================================================================

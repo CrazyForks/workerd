@@ -1,9 +1,13 @@
 #include "inspector.h"
 
+#include "jsg.h"
+#include "simdutf.h"
+#include "util.h"
+
+#include <v8-inspector.h>
+
 #include <kj/encoding.h>
 #include <kj/string.h>
-#include <v8-inspector.h>
-#include "jsg.h"
 
 namespace v8_inspector {
 kj::String KJ_STRINGIFY(const v8_inspector::StringView& view) {
@@ -43,13 +47,7 @@ private:
 }  // namespace
 
 v8_inspector::StringView toInspectorStringView(kj::StringPtr text) {
-  bool isAscii = true;
-  for (char c: text) {
-    if (c & 0x80) {
-      isAscii = false;
-      break;
-    }
-  }
+  bool isAscii = simdutf::validate_ascii(text.begin(), text.size());
 
   if (isAscii) {
     return StringViewWithScratch(

@@ -61,6 +61,9 @@ KJ_TEST("context type is exposed in the global scope") {
 
 struct InheritContext: public ContextGlobalObject {
   struct Other: public Object {
+    static jsg::Ref<Other> constructor() {
+      return jsg::alloc<Other>();
+    }
     JSG_RESOURCE_TYPE(Other) {}
   };
 

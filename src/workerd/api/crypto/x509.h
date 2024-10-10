@@ -1,6 +1,7 @@
 #pragma once
 
 #include <workerd/jsg/jsg.h>
+
 #include <openssl/x509.h>
 
 namespace workerd::api {

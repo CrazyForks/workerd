@@ -3,11 +3,15 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "encoding.h"
+
 #include "util.h"
+
 #include <workerd/jsg/jsg.h>
-#include <workerd/jsg/buffersource.h>
+#include <workerd/util/strings.h>
+
 #include <unicode/ucnv.h>
 #include <unicode/utf8.h>
+
 #include <algorithm>
 
 namespace workerd::api {
@@ -262,10 +266,6 @@ kj::StringPtr getEncodingId(Encoding encoding) {
 Encoding getEncodingForLabel(kj::StringPtr label) {
   kj::String labelInsensitive = toLower(label);
   const auto trim = [](kj::StringPtr label) {
-    const auto isAsciiWhitespace = [](auto c) {
-      return c == 0x09 /* tab */ || c == 0x0a /* lf  */ || c == 0x0c /* ff  */ ||
-          c == 0x0d /* cr  */ || c == 0x20 /* sp  */;
-    };
     size_t start = 0;
     auto end = label.size();
     while (start < end && isAsciiWhitespace(label[start])) {

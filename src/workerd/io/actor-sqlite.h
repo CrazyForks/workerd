@@ -5,7 +5,9 @@
 #pragma once
 
 #include "actor-cache.h"
+
 #include <workerd/util/sqlite-kv.h>
+#include <workerd/util/sqlite-metadata.h>
 
 namespace workerd {
 
@@ -22,10 +24,9 @@ public:
   // for alarm operations.
   class Hooks {
   public:
-    virtual kj::Promise<kj::Maybe<kj::Date>> getAlarm();
-    virtual kj::Promise<void> setAlarm(kj::Maybe<kj::Date> newAlarmTime);
-    virtual kj::Maybe<kj::Own<void>> armAlarmHandler(kj::Date scheduledTime, bool noCache);
-    virtual void cancelDeferredAlarmDeletion();
+    // Makes a request to the alarm manager to run the alarm handler at the given time, returning
+    // a promise that resolves when the scheduling has succeeded.
+    virtual kj::Promise<void> scheduleRun(kj::Maybe<kj::Date> newAlarmTime);
 
     static const Hooks DEFAULT;
   };
@@ -46,7 +47,7 @@ public:
       Hooks& hooks = const_cast<Hooks&>(Hooks::DEFAULT));
 
   bool isCommitScheduled() {
-    return !currentTxn.is<NoTxn>();
+    return !currentTxn.is<NoTxn>() || deleteAllCommitScheduled;
   }
 
   kj::Maybe<SqliteDatabase&> getSqliteDatabase() override {
@@ -75,7 +76,8 @@ public:
   DeleteAllResults deleteAll(WriteOptions options) override;
   kj::Maybe<kj::Promise<void>> evictStale(kj::Date now) override;
   void shutdown(kj::Maybe<const kj::Exception&> maybeException) override;
-  kj::Maybe<kj::Own<void>> armAlarmHandler(kj::Date scheduledTime, bool noCache = false) override;
+  kj::OneOf<CancelAlarmHandler, RunAlarmHandler> armAlarmHandler(
+      kj::Date scheduledTime, bool noCache = false) override;
   void cancelDeferredAlarmDeletion() override;
   kj::Maybe<kj::Promise<void>> onNoPendingFlush() override;
   // See ActorCacheInterface
@@ -86,6 +88,7 @@ private:
   kj::Function<kj::Promise<void>()> commitCallback;
   Hooks& hooks;
   SqliteKv kv;
+  SqliteMetadata metadata;
 
   SqliteDatabase::Statement beginTxn = db->prepare("BEGIN TRANSACTION");
   SqliteDatabase::Statement commitTxn = db->prepare("COMMIT TRANSACTION");
@@ -101,6 +104,7 @@ private:
     KJ_DISALLOW_COPY_AND_MOVE(ImplicitTxn);
 
     void commit();
+    void rollback();
 
   private:
     ActorSqlite& parent;
@@ -113,6 +117,9 @@ private:
     ExplicitTxn(ActorSqlite& actorSqlite);
     ~ExplicitTxn() noexcept(false);
     KJ_DISALLOW_COPY_AND_MOVE(ExplicitTxn);
+
+    bool getAlarmDirty();
+    void setAlarmDirty();
 
     kj::Maybe<kj::Promise<void>> commit() override;
     kj::Promise<void> rollback() override;
@@ -142,6 +149,7 @@ private:
     uint depth = 0;
     bool hasChild = false;
     bool committed = false;
+    bool alarmDirty = false;
 
     void rollbackImpl();
   };
@@ -156,13 +164,70 @@ private:
   // transactions should be used in the meantime.
   kj::OneOf<NoTxn, ImplicitTxn*, ExplicitTxn*> currentTxn = NoTxn();
 
+  // If true, then a commit is scheduled as a result of deleteAll() having been called.
+  bool deleteAllCommitScheduled = false;
+
+  // Backs the `kj::Own<void>` returned by `armAlarmHandler()`.
+  class DeferredAlarmDeleter: public kj::Disposer {
+  public:
+    // The `Own<void>` returned by `armAlarmHandler()` is actually set up to point to the
+    // `ActorSqlite` itself, but with an alternate disposer that deletes the alarm rather than
+    // the whole object.
+    void disposeImpl(void* pointer) const {
+      reinterpret_cast<ActorSqlite*>(pointer)->maybeDeleteDeferredAlarm();
+    }
+  };
+
+  // We need to track some additional alarm state to guarantee at-least-once alarm delivery:
+  // Within an alarm handler, we want the observable alarm state to look like the running alarm
+  // was deleted at the start of the handler (when armAlarmHandler() is called), but we don't
+  // actually want to persist that deletion until after the handler has successfully completed.
+  bool haveDeferredDelete = false;
+
+  // Some state only used for tracking calling invariants.
+  bool inAlarmHandler = false;
+
+  // The alarm state for which we last received confirmation that the db was durably stored.
+  kj::Maybe<kj::Date> lastConfirmedAlarmDbState;
+
+  // The latest time we'd expect a scheduled alarm to fire, given the current set of in-flight
+  // scheduling requests, without yet knowing if any of them succeeded or failed.  We use this
+  // value to maintain the invariant that the scheduled alarm is always equal to or earlier than
+  // the alarm value in the persisted database state.
+  kj::Maybe<kj::Date> alarmScheduledNoLaterThan;
+
+  // A promise for an in-progress alarm notification update and database commit.
+  kj::Maybe<kj::ForkedPromise<void>> pendingCommit;
+
   kj::TaskSet commitTasks;
 
   void onWrite();
 
+  // Issues a request to the alarm scheduler for the given time, returning a promise that resolves
+  // when the request is confirmed.
+  kj::Promise<void> requestScheduledAlarm(kj::Maybe<kj::Date> requestedTime);
+
+  struct PrecommitAlarmState {
+    // Promise for the completion of precommit alarm scheduling
+    kj::Maybe<kj::Promise<void>> schedulingPromise;
+  };
+
+  // To be called just before committing the local sqlite db, to synchronously start any necessary
+  // alarm scheduling:
+  PrecommitAlarmState startPrecommitAlarmScheduling();
+
+  // Performs the rest of the asynchronous commit, to be waited on after committing the local
+  // sqlite db.  Should be called in the same turn of the event loop as
+  // startPrecommitAlarmScheduling() and passed the state that it returned.
+  kj::Promise<void> commitImpl(PrecommitAlarmState precommitAlarmState);
+
   void taskFailed(kj::Exception&& exception) override;
 
   void requireNotBroken();
+
+  // Called when DeferredAlarmDeleter is destroyed, to delete alarm if not reset or cancelled
+  // during handler.
+  void maybeDeleteDeferredAlarm();
 };
 
 }  // namespace workerd

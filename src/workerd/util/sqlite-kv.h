@@ -6,7 +6,16 @@
 
 #include "sqlite.h"
 
+#include <workerd/jsg/exception.h>
+
 namespace workerd {
+
+// Small class which is used to customize certain aspects of the underlying sql operations
+// In this case we just customize the error reporting to emit JSG user visible errors instead
+// of KJ exceptions which become internal errors.
+class SqliteKvRegulator: public SqliteDatabase::Regulator {
+  void onError(kj::Maybe<int> sqliteErrorCode, kj::StringPtr message) const override;
+};
 
 // Class which implements KV storage on top of SQLite. This is intended to be used for Durable
 // Object storage.
@@ -15,7 +24,7 @@ namespace workerd {
 // perform direct SQL queries, we can block it from accessing any table prefixed with `_cf_`.
 // (Ideally this class would allow configuring the table name, but this would require a somewhat
 // obnoxious amount of string allocation.)
-class SqliteKv {
+class SqliteKv: private SqliteDatabase::ResetListener {
 public:
   explicit SqliteKv(SqliteDatabase& db);
 
@@ -51,69 +60,73 @@ public:
   //   byte blobs or strings containing NUL bytes.
 
 private:
-  struct Uninitialized {
-    SqliteDatabase& db;
-  };
+  struct Uninitialized {};
 
   struct Initialized {
+    // This reference is redundant but storing it here makes the prepared statement code below
+    // easier to manage.
     SqliteDatabase& db;
 
-    SqliteDatabase::Statement stmtGet = db.prepare(R"(
+    SqliteKvRegulator regulator;
+
+    SqliteDatabase::Statement stmtGet = db.prepare(regulator, R"(
       SELECT value FROM _cf_KV WHERE key = ?
     )");
-    SqliteDatabase::Statement stmtPut = db.prepare(R"(
+    SqliteDatabase::Statement stmtPut = db.prepare(regulator, R"(
       INSERT INTO _cf_KV VALUES(?, ?)
         ON CONFLICT DO UPDATE SET value = excluded.value;
     )");
-    SqliteDatabase::Statement stmtDelete = db.prepare(R"(
+    SqliteDatabase::Statement stmtDelete = db.prepare(regulator, R"(
       DELETE FROM _cf_KV WHERE key = ?
     )");
-    SqliteDatabase::Statement stmtList = db.prepare(R"(
+    SqliteDatabase::Statement stmtList = db.prepare(regulator, R"(
       SELECT * FROM _cf_KV
       WHERE key >= ?
       ORDER BY key
     )");
-    SqliteDatabase::Statement stmtListEnd = db.prepare(R"(
+    SqliteDatabase::Statement stmtListEnd = db.prepare(regulator, R"(
       SELECT * FROM _cf_KV
       WHERE key >= ? AND key < ?
       ORDER BY key
     )");
-    SqliteDatabase::Statement stmtListLimit = db.prepare(R"(
+    SqliteDatabase::Statement stmtListLimit = db.prepare(regulator, R"(
       SELECT * FROM _cf_KV
       WHERE key >= ?
       ORDER BY key
       LIMIT ?
     )");
-    SqliteDatabase::Statement stmtListEndLimit = db.prepare(R"(
+    SqliteDatabase::Statement stmtListEndLimit = db.prepare(regulator, R"(
       SELECT * FROM _cf_KV
       WHERE key >= ? AND key < ?
       ORDER BY key
       LIMIT ?
     )");
-    SqliteDatabase::Statement stmtListReverse = db.prepare(R"(
+    SqliteDatabase::Statement stmtListReverse = db.prepare(regulator, R"(
       SELECT * FROM _cf_KV
       WHERE key >= ?
       ORDER BY key DESC
     )");
-    SqliteDatabase::Statement stmtListEndReverse = db.prepare(R"(
+    SqliteDatabase::Statement stmtListEndReverse = db.prepare(regulator, R"(
       SELECT * FROM _cf_KV
       WHERE key >= ? AND key < ?
       ORDER BY key DESC
     )");
-    SqliteDatabase::Statement stmtListLimitReverse = db.prepare(R"(
+    SqliteDatabase::Statement stmtListLimitReverse = db.prepare(regulator, R"(
       SELECT * FROM _cf_KV
       WHERE key >= ?
       ORDER BY key DESC
       LIMIT ?
     )");
-    SqliteDatabase::Statement stmtListEndLimitReverse = db.prepare(R"(
+    SqliteDatabase::Statement stmtListEndLimitReverse = db.prepare(regulator, R"(
       SELECT * FROM _cf_KV
       WHERE key >= ? AND key < ?
       ORDER BY key DESC
       LIMIT ?
     )");
-    SqliteDatabase::Statement stmtDeleteAll = db.prepare(R"(
-      DELETE FROM _cf_KV
+    // We don't pass in the regulator here because this query doesn't take user input, so
+    // it failing is always our fault.
+    SqliteDatabase::Statement stmtCountKeys = db.prepare(R"(
+      SELECT count(*) FROM _cf_KV
     )");
 
     Initialized(SqliteDatabase& db): db(db) {}
@@ -121,11 +134,15 @@ private:
 
   kj::OneOf<Uninitialized, Initialized> state;
 
+  // Has the _cf_KV table been created? This is separate from Uninitialized/Initialized since it
+  // has to be repeated after a reset, whereas the statements do not need to be recreated.
+  bool tableCreated = false;
+
   Initialized& ensureInitialized();
   // Make sure the KV table is created and prepared statements are ready. Not called until the
   // first write.
 
-  SqliteKv(SqliteDatabase& db, bool);
+  void beforeSqliteReset() override;
 };
 
 // =======================================================================================
@@ -137,6 +154,7 @@ private:
 
 template <typename Func>
 bool SqliteKv::get(KeyPtr key, Func&& callback) {
+  if (!tableCreated) return 0;
   auto& stmts = KJ_UNWRAP_OR(state.tryGet<Initialized>(), return false);
 
   auto query = stmts.stmtGet.run(key);
@@ -152,6 +170,7 @@ bool SqliteKv::get(KeyPtr key, Func&& callback) {
 template <typename Func>
 uint SqliteKv::list(
     KeyPtr begin, kj::Maybe<KeyPtr> end, kj::Maybe<uint> limit, Order order, Func&& callback) {
+  if (!tableCreated) return 0;
   auto& stmts = KJ_UNWRAP_OR(state.tryGet<Initialized>(), return 0);
 
   auto iterate = [&](SqliteDatabase::Query&& query) {

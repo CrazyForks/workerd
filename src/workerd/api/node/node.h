@@ -1,17 +1,22 @@
 #pragma once
 
-#include "async-hooks.h"
-#include "buffer.h"
 #include "crypto.h"
 #include "diagnostics-channel.h"
-#include "util.h"
 #include "zlib-util.h"
+
+#include <workerd/api/node/async-hooks.h>
+#include <workerd/api/node/buffer.h>
+#include <workerd/api/node/module.h>
+#include <workerd/api/node/url.h>
+#include <workerd/api/node/util.h>
+#include <workerd/io/compatibility-date.h>
 #include <workerd/jsg/jsg.h>
-#include <workerd/jsg/url.h>
-#include <workerd/jsg/modules.h>
 #include <workerd/jsg/modules-new.h>
-#include <capnp/dynamic.h>
+#include <workerd/jsg/url.h>
+
 #include <node/node.capnp.h>
+
+#include <capnp/dynamic.h>
 
 namespace workerd::api::node {
 
@@ -41,9 +46,11 @@ public:
   V(AsyncHooksModule, "node-internal:async_hooks")                                                 \
   V(BufferUtil, "node-internal:buffer")                                                            \
   V(CryptoImpl, "node-internal:crypto")                                                            \
+  V(ModuleUtil, "node-internal:module")                                                            \
   V(UtilModule, "node-internal:util")                                                              \
   V(DiagnosticsChannelModule, "node-internal:diagnostics_channel")                                 \
-  V(ZlibUtil, "node-internal:zlib")
+  V(ZlibUtil, "node-internal:zlib")                                                                \
+  V(UrlUtil, "node-internal:url")
 
 // Add to the NODEJS_MODULES_EXPERIMENTAL list any currently in-development
 // node.js compat C++ modules that should be guarded by the experimental compat
@@ -134,4 +141,5 @@ kj::Own<jsg::modules::ModuleBundle> getExternalNodeJsCompatModuleBundle(auto fea
 #define EW_NODE_ISOLATE_TYPES                                                                      \
   api::node::CompatibilityFlags, EW_NODE_BUFFER_ISOLATE_TYPES, EW_NODE_CRYPTO_ISOLATE_TYPES,       \
       EW_NODE_DIAGNOSTICCHANNEL_ISOLATE_TYPES, EW_NODE_ASYNCHOOKS_ISOLATE_TYPES,                   \
-      EW_NODE_UTIL_ISOLATE_TYPES, EW_NODE_ZLIB_ISOLATE_TYPES
+      EW_NODE_UTIL_ISOLATE_TYPES, EW_NODE_ZLIB_ISOLATE_TYPES, EW_NODE_URL_ISOLATE_TYPES,           \
+      EW_NODE_MODULE_ISOLATE_TYPES\

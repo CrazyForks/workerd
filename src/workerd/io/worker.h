@@ -5,24 +5,24 @@
 #pragma once
 // Classes to manage lifetime of workers, scripts, and isolates.
 
-#include <workerd/util/xthreadnotifier.h>
-#include <workerd/io/worker-interface.h>
-#include <workerd/io/limit-enforcer.h>
-#include <kj/compat/http.h>
-#include <workerd/io/outcome.capnp.h>
-#include <workerd/io/worker-interface.capnp.h>
-#include <workerd/io/compatibility-date.capnp.h>
-#include <workerd/jsg/jsg.h>
-#include <workerd/jsg/async-context.h>
-#include <kj/mutex.h>
-#include <workerd/io/io-channels.h>
-#include <workerd/io/actor-id.h>
-#include <workerd/io/actor-storage.capnp.h>
-#include <workerd/io/request-tracker.h>
 #include <workerd/io/actor-cache.h>  // because we can't forward-declare ActorCache::SharedLru.
-#include <workerd/util/weak-refs.h>
+#include <workerd/io/actor-id.h>
+#include <workerd/io/compatibility-date.capnp.h>
+#include <workerd/io/io-channels.h>
+#include <workerd/io/limit-enforcer.h>
+#include <workerd/io/outcome.capnp.h>
+#include <workerd/io/request-tracker.h>
+#include <workerd/io/worker-interface.capnp.h>
+#include <workerd/io/worker-interface.h>
+#include <workerd/jsg/async-context.h>
+#include <workerd/jsg/jsg.h>
 #include <workerd/util/thread-scopes.h>
 #include <workerd/util/uncaught-exception-source.h>
+#include <workerd/util/weak-refs.h>
+#include <workerd/util/xthreadnotifier.h>
+
+#include <kj/compat/http.h>
+#include <kj/mutex.h>
 
 namespace v8 {
 class Isolate;
@@ -483,8 +483,8 @@ public:
     // Class constructor for DurableObject (aka api::DurableObjectBase).
     jsg::JsObject durableObject;
 
-    // Class constructor for Workflow.
-    jsg::JsObject workflow;
+    // Class constructor for WorkflowEntrypoint
+    jsg::JsObject workflowEntrypoint;
   };
 
   // Get the constructors for classes from which entrypoint classes may inherit.
@@ -677,8 +677,11 @@ public:
   // Callback which constructs the `ActorCacheInterface` instance (if any) for the Actor. This
   // can be used to customize the storage implementation. This will be called synchronously in
   // the constructor.
-  using MakeActorCacheFunc = kj::Function<kj::Maybe<kj::Own<ActorCacheInterface>>(
-      const ActorCache::SharedLru& sharedLru, OutputGate& outputGate, ActorCache::Hooks& hooks)>;
+  using MakeActorCacheFunc =
+      kj::Function<kj::Maybe<kj::Own<ActorCacheInterface>>(const ActorCache::SharedLru& sharedLru,
+          OutputGate& outputGate,
+          ActorCache::Hooks& hooks,
+          SqliteObserver& sqliteObserver)>;
 
   // Callback which constructs the `DurableObjectStorage` instance for an actor. This can be used
   // to customize the JavaScript API.

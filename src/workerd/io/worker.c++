@@ -2,45 +2,50 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
-#include <cstdint>
-#include <workerd/io/worker.h>
-#include <workerd/io/promise-wrapper.h>
 #include "actor-cache.h"
+
+#include <workerd/api/actor-state.h>
+#include <workerd/api/global-scope.h>
+#include <workerd/api/sockets.h>
+#include <workerd/api/streams.h>  // for api::StreamEncoding
+#include <workerd/io/cdp.capnp.h>
+#include <workerd/io/compatibility-date.h>
+#include <workerd/io/features.h>
+#include <workerd/io/promise-wrapper.h>
+#include <workerd/io/worker.h>
+#include <workerd/jsg/async-context.h>
+#include <workerd/jsg/inspector.h>
+#include <workerd/jsg/jsg.h>
+#include <workerd/jsg/modules-new.h>
+#include <workerd/jsg/util.h>
 #include <workerd/util/batch-queue.h>
 #include <workerd/util/color-util.h>
 #include <workerd/util/mimetype.h>
 #include <workerd/util/stream-utils.h>
 #include <workerd/util/thread-scopes.h>
 #include <workerd/util/xthreadnotifier.h>
-#include <workerd/api/actor-state.h>
-#include <workerd/api/global-scope.h>
-#include <workerd/api/sockets.h>
-#include <workerd/api/streams.h>  // for api::StreamEncoding
-#include <workerd/jsg/async-context.h>
-#include <workerd/jsg/jsg.h>
-#include <workerd/jsg/inspector.h>
-#include <workerd/jsg/modules.h>
-#include <workerd/jsg/modules-new.h>
-#include <workerd/jsg/util.h>
-#include <workerd/io/cdp.capnp.h>
-#include <workerd/io/compatibility-date.h>
-#include <capnp/message.h>
+
+#include <v8-inspector.h>
+#include <v8-profiler.h>
+
 #include <capnp/compat/json.h>
-#include <kj/compat/gzip.h>
+#include <capnp/message.h>
 #include <kj/compat/brotli.h>
+#include <kj/compat/gzip.h>
 #include <kj/encoding.h>
 #include <kj/filesystem.h>
 #include <kj/map.h>
-#include <v8-inspector.h>
-#include <v8-profiler.h>
-#include <map>
+
+#include <cstdint>
 #include <ctime>
+#include <map>
 #include <numeric>
 
 #if _WIN32
-#include <kj/win32-api-version.h>
 #include <io.h>
 #include <windows.h>
+
+#include <kj/win32-api-version.h>
 #include <kj/windows-sanity.h>
 #else
 #include <sys/syscall.h>
@@ -1023,6 +1028,9 @@ Worker::Isolate::Isolate(kj::Own<Api> apiParam,
 
     lock->setCaptureThrowsAsRejections(features.getCaptureThrowsAsRejections());
     lock->setCommonJsExportDefault(features.getExportCommonJsDefaultNamespace());
+    if (features.getSetToStringTag()) {
+      lock->setToStringTag();
+    }
     if (features.getNodeJsCompatV2()) {
       lock->setNodeJsCompatEnabled();
     }
@@ -1091,7 +1099,7 @@ Worker::Isolate::Isolate(kj::Own<Api> apiParam,
       // doesn't currently provide an easy way to do this.
       if (IoContext::hasCurrent()) {
         try {
-          IoContext::current().reportPromiseRejectEvent(message);
+          IoContext::current().getCurrentLock().reportPromiseRejectEvent(message);
         } catch (jsg::JsExceptionThrown&) {
           // V8 expects us to just return.
           return;
@@ -1141,6 +1149,115 @@ Worker::Isolate::Isolate(kj::Own<Api> apiParam,
         return v8::MaybeLocal<v8::Promise>();
       }
     });
+
+    // The PromiseCrossContextResolveCallback is used to ensure that promise reactions
+    // are only scheduled on the microtask queue from the appropriate IoContext for the
+    // promise. Huh? Yeah, that's not super clear... let me explain a bit more.
+    // Every request runs in it's own IoContext.
+    // Some I/O objects are bound to the IoContext when they are created.
+    // If these objects are accessed from the wrong IoContext, things blow up.
+    // If I create a promise in one request and pass the resolve/reject functions
+    // off to a different request, bad things can happen because the IoContext can
+    // actually change in the promise continuation. Take the following case for example:
+    //
+    // In request one:
+    //
+    //  const ab = AbortSignal.abort();  // AbortSignal is bound to the IoContext
+    //  const { promise, resolve } = Promise.withResolvers();
+    //  globalThis.resolve = resolve;
+    //  await promise;
+    //  console.log(ab.aborted);
+    //
+    // In request two:
+    //
+    //  globalThis.resolve();
+    //
+    // What previously would happen is that the `console.log(ab.aborted) after the
+    // `await promise` in request one would fail with an error because the current
+    // IoContext would change! (it would be the IoContext from request two!).
+    //
+    // That's bad.
+    //
+    // So this callback is added to ensure that the promise reactions for the promise
+    // being resolved are not scheduled until we are back in the correct IoContext for
+    // the promise.
+    //
+    // This happens by (ab)using the DeleteQueue that is specific to the owning
+    // IoContext. When the IoContext is entered, the isolate is updated with a
+    // current "promise tag". Whenever a promise is created, it is associated with
+    // the isolate's current tag. Whenever a promise is followed (calling .then, etc),
+    // we check the tag and arrange for a cross-thread resolve. When the promise is
+    // resolved or rejected, we check the tag also. If the promise tag and the current
+    // isolate tag do not match, the function below is called.
+    if (features.getHandleCrossRequestPromiseResolution()) {
+      lock->v8Isolate->SetPromiseCrossContextResolveCallback(
+          [](v8::Isolate* isolate, v8::Local<v8::Value> tag, v8::Local<v8::Data> reactions,
+              v8::Local<v8::Value> argument,
+              std::function<void(v8::Isolate * isolate, v8::Local<v8::Data> reactions,
+                  v8::Local<v8::Value> argument)> callback) -> v8::Maybe<void> {
+        try {
+          auto& js = jsg::Lock::from(isolate);
+
+          {
+            // TODO(soon): Hopefully this logging is temporary. We want to get an idea
+            // of where the cross request promises are being resolved just in general.
+            // To do so we need to try to capture a stack. We do so by creating an error
+            // object and logging it.
+            v8::HandleScope handleScope(isolate);
+            auto err =
+                v8::Exception::Error(js.str("Cross Request Promise Resolve"_kj)).As<v8::Object>();
+            jsg::check(err->Set(js.v8Context(), js.str("name"_kj), js.str("Warning"_kj)));
+            auto stack = jsg::check(err->Get(js.v8Context(), js.str("stack"_kj)));
+            auto msg = kj::str("NOSENTRY ", stack);
+            if (msg != "NOSENTRY Warning: Cross Request Promise Resolve") {
+              LOG_PERIODICALLY(WARNING, msg);
+            } else {
+              // If we get here, it means we don't have a useful JS stack trace.
+              // Either the stack trace limit was set to zero for some reason or
+              // this resolve/reject originated from inside the runtime where a
+              // JS stack trace is not available. Let's emit the warning with a
+              // C++ stack instead.
+              // TODO(review): Is this worthwhile? Does it give us enough useful signal?
+              LOG_PERIODICALLY(WARNING, kj::str(msg, "\n", kj::getStackTrace()));
+            }
+          }
+
+          // The promise tag is generally opaque except for right here. The tag
+          // wraps an instanceof kj::Own<IoCrossContextExecutor>, which wraps an atomically
+          // refcounted pointer to the DeleteQueue for the correct isolate.
+          // We simply pass the given callback, reactions, and argument to
+          // a function that will be added to the queue inside DeleteQueue.
+          // The next time the relevant IoContext is entered, this queue will
+          // be drained and the actions will be run. Adding the task to the
+          // delete queue will also signal the IoContext that it should wake
+          // up and drain the queue. Simple, eh?
+          //
+          // A word of warning tho! It is possible for the IoContext to be
+          // destroyed before the promise is resolved. Any actions that have
+          // already been added to the queue would end up being dropped silently
+          // on the floor. Actions that are added to the queue now will be run
+          // immediately in the wrong IoContext.
+          auto& ref = jsg::unwrapOpaqueRef<kj::Own<IoCrossContextExecutor>>(isolate, tag);
+          ref->execute(js,
+              [reactions = jsg::Data(isolate, reactions), argument = jsg::V8Ref(isolate, argument),
+                  callback = kj::mv(callback)](jsg::Lock& js) mutable {
+            callback(js.v8Isolate, reactions.getHandle(js), argument.getHandle(js));
+          });
+          return v8::JustVoid();
+        } catch (jsg::JsExceptionThrown&) {
+          // Exceptions here are generally unexpected but possible because the jsg::Promise
+          // then can fail if the isolate is in the process of being torn down. Let's just
+          // return control back to V8 which should handle the case.
+          // Note that errors thrown here and below should cause the resolve() or reject()
+          // function calls to throw, which is unusual. Just important to keep that in mind.
+          // Most likely errors thrown here are fatal so that should be ok.
+          return v8::Nothing<void>();
+        } catch (...) {
+          jsg::throwInternalError(isolate, kj::getCaughtExceptionAsKj());
+          return v8::Nothing<void>();
+        }
+      });
+    }
   });
 }
 
@@ -1361,6 +1478,21 @@ void setWebAssemblyModuleHasInstance(jsg::Lock& lock, v8::Local<v8::Context> con
 // =======================================================================================
 
 namespace {
+
+jsg::JsObject resolveNodeInspectModule(jsg::Lock& js) {
+  static constexpr auto kSpecifier = "node-internal:internal_inspect"_kj;
+  if (FeatureFlags::get(js).getNewModuleRegistry()) {
+    return KJ_ASSERT_NONNULL(
+        jsg::modules::ModuleRegistry::tryResolveModuleNamespace(js, kSpecifier));
+  }
+
+  // Use the original module registry implementation
+  auto registry = jsg::ModuleRegistry::from(js);
+  KJ_ASSERT(registry != nullptr);
+  auto inspectModule = registry->resolveInternalImport(js, kSpecifier);
+  return jsg::JsObject(inspectModule.getHandle(js).As<v8::Object>());
+}
+
 kj::Maybe<jsg::JsObject> tryResolveMainModule(jsg::Lock& js,
     const kj::Path& mainModule,
     jsg::JsContext<api::ServiceWorkerGlobalScope>& jsContext,
@@ -1549,7 +1681,7 @@ Worker::Worker(kj::Own<const Script> scriptParam,
                             } else if (handle == entrypointClasses.workerEntrypoint) {
                               impl->statelessClasses.insert(kj::mv(handler.name), kj::mv(cls));
                               return;
-                            } else if (handle == entrypointClasses.workflow) {
+                            } else if (handle == entrypointClasses.workflowEntrypoint) {
                               if (features.getWorkerdExperimental()) {
                                 impl->statelessClasses.insert(kj::mv(handler.name), kj::mv(cls));
                               }
@@ -1586,12 +1718,10 @@ Worker::Worker(kj::Own<const Script> scriptParam,
                 KJ_CASE_ONEOF(startupTimeElapsed, kj::Duration) {
                   s = startupTimeElapsed;
                 }
-                KJ_CASE_ONEOF(limitError, kj::Exception) {
-                }
+                KJ_CASE_ONEOF(limitError, kj::Exception) {}
               }
             } else {
-            }  // Added to suppress a compiler warning
-
+            }
             startupMetrics->done();
           } catch (const kj::Exception& e) {
             lock.throwException(kj::cp(e));
@@ -1631,9 +1761,9 @@ void Worker::handleLog(jsg::Lock& js,
   // Call original V8 implementation so messages sent to connected inspector if any
   auto context = js.v8Context();
   int length = info.Length();
-  KJ_STACK_ARRAY(v8::Local<v8::Value>, args, length + 1, 64, 64);  // + 1 used for `colors` later
+  v8::LocalVector<v8::Value> args(js.v8Isolate, length + 1);
   for (auto i: kj::zeroTo(length)) args[i] = info[i];
-  jsg::check(original.Get(js.v8Isolate)->Call(context, info.This(), length, args.begin()));
+  jsg::check(original.Get(js.v8Isolate)->Call(context, info.This(), length, args.data()));
 
   // The TryCatch is initialised here to catch cases where the v8 isolate's execution is
   // terminating, usually as a result of an infinite loop. We need to perform the initialisation
@@ -1672,8 +1802,8 @@ void Worker::handleLog(jsg::Lock& js,
 
           // Determine whether `obj` is constructed using `{}` or `new Object()`. This ensures
           // we don't serialise values like Promises to JSON.
-          if (obj->GetPrototype()->SameValue(freshObj->GetPrototype()) ||
-              obj->GetPrototype()->IsNull()) {
+          if (obj->GetPrototypeV2()->SameValue(freshObj->GetPrototypeV2()) ||
+              obj->GetPrototypeV2()->IsNull()) {
             shouldSerialiseToJson = true;
           }
 
@@ -1742,15 +1872,14 @@ void Worker::handleLog(jsg::Lock& js,
     auto colors =
         COLOR_MODE == ColorMode::ENABLED || (COLOR_MODE == ColorMode::ENABLED_IF_TTY && tty);
 
-    auto registry = jsg::ModuleRegistry::from(js);
-    auto inspectModule = registry->resolveInternalImport(js, "node-internal:internal_inspect"_kj);
-    auto inspectModuleHandle = inspectModule.getHandle(js).As<v8::Object>();
-    auto formatLog = js.v8Get(inspectModuleHandle, "formatLog"_kj).As<v8::Function>();
+    auto inspectModule = resolveNodeInspectModule(js);
+    v8::Local<v8::Value> formatLogVal = inspectModule.get(js, "formatLog"_kj);
+    KJ_ASSERT(formatLogVal->IsFunction());
+    auto formatLog = formatLogVal.As<v8::Function>();
 
-    auto recv = js.v8Undefined();
     args[length] = v8::Boolean::New(js.v8Isolate, colors);
-    auto formatted =
-        js.toString(jsg::check(formatLog->Call(context, recv, length + 1, args.begin())));
+    auto formatted = js.toString(
+        jsg::check(formatLog->Call(context, js.v8Undefined(), length + 1, args.data())));
     fprintf(fd, "%s\n", formatted.cStr());
     fflush(fd);
   }
@@ -2471,8 +2600,7 @@ public:
           inspector.contextDestroyed(dummyContext);
         });
       }
-      KJ_CASE_ONEOF(startupTimeElapsed, kj::Duration) {
-      }
+      KJ_CASE_ONEOF(startupTimeElapsed, kj::Duration) {}
     }
 
     if (recordedLock.checkInWithLimitEnforcer(isolate)) {
@@ -3210,7 +3338,8 @@ struct Worker::Actor::Impl {
         transient.emplace(js, js.obj());
       }
 
-      actorCache = makeActorCache(self.worker->getIsolate().impl->actorCacheLru, outputGate, hooks);
+      actorCache = makeActorCache(
+          self.worker->getIsolate().impl->actorCacheLru, outputGate, hooks, *metrics);
     });
   }
 };

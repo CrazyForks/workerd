@@ -18,6 +18,10 @@ enum Operation {
 
 type VectorizeVersion = 'v1' | 'v2';
 
+function toNdJson(arr: object[]): string {
+  return arr.reduce((acc, o) => acc + JSON.stringify(o) + '\n', '').trim();
+}
+
 /*
  * The Vectorize beta VectorizeIndex shares the same methods, so to keep things simple, they share one implementation.
  * The types here are specific to Vectorize GA, but the types here don't actually matter as they are stripped away
@@ -27,7 +31,8 @@ class VectorizeIndexImpl implements Vectorize {
   public constructor(
     private readonly fetcher: Fetcher,
     private readonly indexId: string,
-    private readonly indexVersion: VectorizeVersion
+    private readonly indexVersion: VectorizeVersion,
+    private readonly useNdJson: boolean
   ) {}
 
   public async describe(): Promise<VectorizeIndexInfo> {
@@ -45,14 +50,21 @@ class VectorizeIndexImpl implements Vectorize {
     options?: VectorizeQueryOptions
   ): Promise<VectorizeMatches> {
     if (this.indexVersion === 'v2') {
-      if (
-        options &&
-        options.returnMetadata &&
-        !isVectorizeMetadataRetrievalLevel(options.returnMetadata)
-      ) {
-        throw new Error(
-          `Invalid returnMetadata option. Expected: "none", "indexed" or "all"; got: ${options.returnMetadata}`
-        );
+      if (options?.returnMetadata) {
+        if (
+          typeof options.returnMetadata !== 'boolean' &&
+          !isVectorizeMetadataRetrievalLevel(options.returnMetadata)
+        ) {
+          throw new Error(
+            `Invalid returnMetadata option. Expected: true, false, "none", "indexed" or "all"; got: ${options.returnMetadata}`
+          );
+        }
+
+        if (typeof options.returnMetadata === 'boolean') {
+          // Allow boolean returnMetadata for backward compatibility. true converts to 'all' and false converts to 'none'
+          // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+          options.returnMetadata = options.returnMetadata ? 'all' : 'none';
+        }
       }
       const res = await this._send(Operation.VECTOR_QUERY, `query`, {
         method: 'POST',
@@ -109,18 +121,24 @@ class VectorizeIndexImpl implements Vectorize {
       this.indexVersion === 'v2'
         ? `insert`
         : `binding/indexes/${this.indexId}/insert`;
+    const bodyVecArr = vectors.map((vec) => ({
+      ...vec,
+      values: Array.isArray(vec.values) ? vec.values : Array.from(vec.values),
+    }));
+
+    const body = this.useNdJson
+      ? toNdJson(bodyVecArr)
+      : JSON.stringify({ vectors: bodyVecArr });
+
+    const contentType = this.useNdJson
+      ? 'application/x-ndjson'
+      : 'application/json';
+
     const res = await this._send(Operation.VECTOR_INSERT, endpoint, {
       method: 'POST',
-      body: JSON.stringify({
-        vectors: vectors.map((vec) => ({
-          ...vec,
-          values: Array.isArray(vec.values)
-            ? vec.values
-            : Array.from(vec.values),
-        })),
-      }),
+      body,
       headers: {
-        'content-type': 'application/json',
+        'content-type': contentType,
         'cf-vector-search-dim-width': String(
           vectors.length ? vectors[0]?.values?.length : 0
         ),
@@ -139,18 +157,24 @@ class VectorizeIndexImpl implements Vectorize {
       this.indexVersion === 'v2'
         ? `upsert`
         : `binding/indexes/${this.indexId}/upsert`;
+    const bodyVecArr = vectors.map((vec) => ({
+      ...vec,
+      values: Array.isArray(vec.values) ? vec.values : Array.from(vec.values),
+    }));
+
+    const body = this.useNdJson
+      ? toNdJson(bodyVecArr)
+      : JSON.stringify({ vectors: bodyVecArr });
+
+    const contentType = this.useNdJson
+      ? 'application/x-ndjson'
+      : 'application/json';
+
     const res = await this._send(Operation.VECTOR_UPSERT, endpoint, {
       method: 'POST',
-      body: JSON.stringify({
-        vectors: vectors.map((vec) => ({
-          ...vec,
-          values: Array.isArray(vec.values)
-            ? vec.values
-            : Array.from(vec.values),
-        })),
-      }),
+      body,
       headers: {
-        'content-type': 'application/json',
+        'content-type': contentType,
         'cf-vector-search-dim-width': String(
           vectors.length ? vectors[0]?.values?.length : 0
         ),
@@ -220,7 +244,9 @@ class VectorizeIndexImpl implements Vectorize {
             cause: new Error(errResponse.error),
           }
         );
-      } catch {}
+      } catch {
+        // do nothing
+      }
 
       if (err) {
         throw err;
@@ -238,9 +264,7 @@ class VectorizeIndexImpl implements Vectorize {
   }
 }
 
-function isVectorizeMetadataRetrievalLevel(
-  value: unknown
-): value is VectorizeMetadataRetrievalLevel {
+function isVectorizeMetadataRetrievalLevel(value: unknown): boolean {
   return (
     typeof value === 'string' &&
     (value === 'all' || value === 'indexed' || value === 'none')
@@ -267,11 +291,13 @@ export function makeBinding(env: {
   fetcher: Fetcher;
   indexId: string;
   indexVersion?: VectorizeVersion;
+  useNdJson?: boolean;
 }): Vectorize {
   return new VectorizeIndexImpl(
     env.fetcher,
     env.indexId,
-    env.indexVersion ?? 'v1'
+    env.indexVersion ?? 'v1',
+    env.useNdJson ?? false
   );
 }
 

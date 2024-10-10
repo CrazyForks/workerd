@@ -8,12 +8,14 @@
 // Handling of various basic value types: numbers, booleans, strings, optionals, maybes, variants,
 // arrays, buffers, dicts.
 
+#include "simdutf.h"
 #include "util.h"
-#include "wrappable.h"
 #include "web-idl.h"
-#include <kj/time.h>
+#include "wrappable.h"
+
 #include <kj/debug.h>
 #include <kj/one-of.h>
+#include <kj/time.h>
 
 namespace workerd::jsg {
 
@@ -467,20 +469,23 @@ public:
       kj::Maybe<v8::Local<v8::Object>> parentObject) {
     // TODO(cleanup): Move to a HeaderStringWrapper in the api directory.
     v8::Local<v8::String> str = check(handle->ToString(context));
-    auto result =
-        ByteString(KJ_ASSERT_NONNULL(tryUnwrap(context, str, (kj::String*)nullptr, parentObject)));
-    if (str->ContainsOnlyOneByte()) {
-      auto buf = kj::heapArray<kj::byte>(str->Length() + 1);
-      str->WriteOneByte(context->GetIsolate(), buf.begin());
-      for (auto b: buf) {
-        if (b >= 128) {
-          result.warning = ByteString::Warning::CONTAINS_EXTENDED_ASCII;
-          break;
-        }
+    auto result = ByteString(KJ_ASSERT_NONNULL(
+        tryUnwrap(context, str, static_cast<kj::String*>(nullptr), parentObject)));
+
+    if (!simdutf::validate_ascii(result.begin(), result.size())) {
+      // If storage is one-byte or the string contains only one-byte
+      // characters, we know that it contains extended ASCII characters.
+      //
+      // The order of execution matters, since ContainsOnlyOneByte()
+      // will scan the whole string for two-byte storage.
+      if (str->ContainsOnlyOneByte()) {
+        result.warning = ByteString::Warning::CONTAINS_EXTENDED_ASCII;
+      } else {
+        // Storage is two-bytes and it contains two-byte characters.
+        result.warning = ByteString::Warning::CONTAINS_UNICODE;
       }
-    } else {
-      result.warning = ByteString::Warning::CONTAINS_UNICODE;
     }
+
     return kj::mv(result);
   }
 };
@@ -792,14 +797,13 @@ public:
     v8::Isolate* isolate = context->GetIsolate();
     v8::EscapableHandleScope handleScope(isolate);
 
-    auto len = array.size();
-    KJ_STACK_ARRAY(v8::Local<v8::Value>, items, len, MAX_STACK, MAX_STACK);
-    for (auto n = 0; n < len; n++) {
+    v8::LocalVector<v8::Value> items(isolate, array.size());
+    for (auto n = 0; n < items.size(); n++) {
       items[n] = static_cast<TypeWrapper*>(this)
                      ->wrap(context, creator, kj::mv(array[n]))
                      .template As<v8::Value>();
     }
-    auto out = v8::Array::New(isolate, items.begin(), len);
+    auto out = v8::Array::New(isolate, items.data(), items.size());
 
     return handleScope.Escape(out);
   }
@@ -810,14 +814,13 @@ public:
     v8::Isolate* isolate = context->GetIsolate();
     v8::EscapableHandleScope handleScope(isolate);
 
-    auto len = array.size();
-    KJ_STACK_ARRAY(v8::Local<v8::Value>, items, len, MAX_STACK, MAX_STACK);
-    for (auto n = 0; n < len; n++) {
+    v8::LocalVector<v8::Value> items(isolate, array.size());
+    for (auto n = 0; n < items.size(); n++) {
       items[n] = static_cast<TypeWrapper*>(this)
                      ->wrap(context, creator, kj::mv(array[n]))
                      .template As<v8::Value>();
     }
-    auto out = v8::Array::New(isolate, items.begin(), len);
+    auto out = v8::Array::New(isolate, items.data(), items.size());
 
     return handleScope.Escape(out);
   }

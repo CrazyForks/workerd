@@ -2,10 +2,13 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 #include "mimetype.h"
+
 #include "strings.h"
+
+#include <workerd/util/string-buffer.h>
+
 #include <kj/debug.h>
 #include <kj/string-tree.h>
-#include <workerd/util/string-buffer.h>
 
 namespace workerd {
 
@@ -427,8 +430,7 @@ kj::Maybe<MimeType> MimeType::extract(kj::StringPtr input) {
     for (size_t i = 0; i < input.size(); ++i) {
       if (input[i] == '"' && (i == 0 || input[i - 1] != '\\')) {
         // Skip to the end of the quoted section
-        while (++i < input.size() && (input[i] != '"' || input[i - 1] == '\\')) {
-        }
+        while (++i < input.size() && (input[i] != '"' || input[i - 1] == '\\')) {}
       } else if (input[i] == ',' && (i == 0 || input[i - 1] != '\\')) {
         return i;
       }

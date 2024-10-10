@@ -7,11 +7,14 @@
 //
 // See actor.h for APIs used by other Workers to talk to Actors.
 
-#include <workerd/jsg/jsg.h>
-#include <workerd/io/io-context.h>
-#include <workerd/io/actor-storage.capnp.h>
-#include <kj/async.h>
 #include <workerd/io/actor-cache.h>
+#include <workerd/io/actor-id.h>
+#include <workerd/io/compatibility-date.capnp.h>
+#include <workerd/io/io-own.h>
+#include <workerd/io/worker.h>
+#include <workerd/jsg/jsg.h>
+
+#include <kj/async.h>
 
 namespace workerd::api {
 class SqlStorage;
@@ -170,11 +173,16 @@ class DurableObjectTransaction;
 
 class DurableObjectStorage: public jsg::Object, public DurableObjectStorageOperations {
 public:
-  DurableObjectStorage(IoPtr<ActorCacheInterface> cache): cache(kj::mv(cache)) {}
+  DurableObjectStorage(IoPtr<ActorCacheInterface> cache, bool enableSql)
+      : cache(kj::mv(cache)),
+        enableSql(enableSql) {}
 
   ActorCacheInterface& getActorCacheInterface() {
     return *cache;
   }
+
+  // Throws if not SQLite-backed.
+  SqliteDatabase& getSqliteDb(jsg::Lock& js);
 
   struct TransactionOptions {
     jsg::Optional<kj::Date> asOfTime;
@@ -231,14 +239,12 @@ public:
     JSG_METHOD(deleteAlarm);
     JSG_METHOD(sync);
 
-    if (flags.getWorkerdExperimental()) {
-      JSG_LAZY_INSTANCE_PROPERTY(sql, getSql);
-      JSG_METHOD(transactionSync);
+    JSG_LAZY_INSTANCE_PROPERTY(sql, getSql);
+    JSG_METHOD(transactionSync);
 
-      JSG_METHOD(getCurrentBookmark);
-      JSG_METHOD(getBookmarkForTime);
-      JSG_METHOD(onNextSessionRestoreBookmark);
-    }
+    JSG_METHOD(getCurrentBookmark);
+    JSG_METHOD(getBookmarkForTime);
+    JSG_METHOD(onNextSessionRestoreBookmark);
 
     JSG_TS_OVERRIDE({
       get<T = unknown>(key: string, options?: DurableObjectGetOptions): Promise<T | undefined>;
@@ -266,6 +272,7 @@ protected:
 
 private:
   IoPtr<ActorCacheInterface> cache;
+  bool enableSql;
   uint transactionSyncDepth = 0;
 };
 
@@ -499,12 +506,7 @@ public:
     JSG_METHOD(getHibernatableWebSocketEventTimeout);
     JSG_METHOD(getTags);
 
-    if (flags.getWorkerdExperimental()) {
-      // TODO(someday): This currently exists for testing purposes only but maybe it could be
-      //   useful to apps in actual production? It's a convenient way to bail out when you discover
-      //   your state is inconsistent.
-      JSG_METHOD(abort);
-    }
+    JSG_METHOD(abort);
 
     JSG_TS_ROOT();
     JSG_TS_OVERRIDE({

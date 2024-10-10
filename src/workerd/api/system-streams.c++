@@ -3,10 +3,12 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "system-streams.h"
+
 #include "util.h"
-#include <kj/one-of.h>
-#include <kj/compat/gzip.h>
+
 #include <kj/compat/brotli.h>
+#include <kj/compat/gzip.h>
+#include <kj/one-of.h>
 
 namespace workerd::api {
 
@@ -253,8 +255,7 @@ kj::Maybe<kj::Promise<DeferredProxy<void>>> EncodedAsyncOutputStream::tryPumpFro
         KJ_CASE_ONEOF(br, kj::Own<kj::BrotliAsyncOutputStream>) {
           promise = promise.then([&br = br]() { return br->end(); });
         }
-        KJ_CASE_ONEOF(e, Ended) {
-        }
+        KJ_CASE_ONEOF(e, Ended) {}
       }
     }
 
@@ -294,8 +295,7 @@ kj::Promise<void> EncodedAsyncOutputStream::end() {
     KJ_CASE_ONEOF(br, kj::Own<kj::BrotliAsyncOutputStream>) {
       promise = br->end().attach(kj::mv(br));
     }
-    KJ_CASE_ONEOF(e, Ended) {
-    }
+    KJ_CASE_ONEOF(e, Ended) {}
   }
 
   inner.init<Ended>();

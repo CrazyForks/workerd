@@ -3,26 +3,33 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "http.h"
+
 #include "data-url.h"
+#include "queue.h"
 #include "sockets.h"
 #include "system-streams.h"
 #include "util.h"
-#include "queue.h"
 #include "worker-rpc.h"
-#include <kj/encoding.h>
-#include <kj/compat/url.h>
-#include <kj/memory.h>
-#include <kj/parse/char.h>
+#include "workerd/jsg/jsvalue.h"
+
 #include <workerd/io/features.h>
+#include <workerd/io/io-context.h>
+#include <workerd/jsg/ser.h>
+#include <workerd/jsg/url.h>
+#include <workerd/util/abortable.h>
+#include <workerd/util/autogate.h>
 #include <workerd/util/http-util.h>
 #include <workerd/util/mimetype.h>
 #include <workerd/util/stream-utils.h>
 #include <workerd/util/thread-scopes.h>
-#include <workerd/jsg/ser.h>
-#include <workerd/jsg/url.h>
-#include <workerd/io/io-context.h>
-#include <set>
+
 #include <capnp/compat/http-over-capnp.capnp.h>
+#include <kj/compat/url.h>
+#include <kj/encoding.h>
+#include <kj/memory.h>
+#include <kj/parse/char.h>
+
+#include <set>
 
 namespace workerd::api {
 
@@ -37,7 +44,7 @@ void warnIfBadHeaderString(const jsg::ByteString& byteString) {
         // the wrong thing by UTF-8-encoding their bytes. To help the author understand the issue,
         // we can show the string that they would be putting in the header if we implemented the
         // spec correctly, and the string that is actually going get serialized onto the wire.
-        auto rawHex = kj::strArray(KJ_MAP(b, kj::encodeUtf16(byteString)) {
+        auto rawHex = kj::strArray(KJ_MAP(b, fastEncodeUtf16(byteString.asArray())) {
           KJ_ASSERT(b < 256);  // Guaranteed by StringWrapper having set CONTAINS_EXTENDED_ASCII.
           return kj::str("\\x", kj::hex(kj::byte(b)));
         }, "");
@@ -111,6 +118,24 @@ void requireValidHeaderValue(kj::StringPtr value) {
   for (char c: value) {
     JSG_REQUIRE(c != '\0' && c != '\r' && c != '\n', TypeError, "Invalid header value.");
   }
+}
+
+Request::CacheMode getCacheModeFromName(kj::StringPtr value) {
+  if (value == "no-store") return Request::CacheMode::NOSTORE;
+  if (value == "no-cache") return Request::CacheMode::NOCACHE;
+  JSG_FAIL_REQUIRE(TypeError, kj::str("Unsupported cache mode: ", value));
+}
+
+jsg::Optional<kj::StringPtr> getCacheModeName(Request::CacheMode mode) {
+  switch (mode) {
+    case (Request::CacheMode::NONE):
+      return kj::none;
+    case (Request::CacheMode::NOCACHE):
+      return "no-cache"_kj;
+    case (Request::CacheMode::NOSTORE):
+      return "no-store"_kj;
+  }
+  KJ_UNREACHABLE;
 }
 
 }  // namespace
@@ -876,6 +901,13 @@ jsg::Ref<Request> Request::coerce(
       : Request::constructor(js, kj::mv(input), kj::mv(init));
 }
 
+jsg::Optional<kj::StringPtr> Request::getCache(jsg::Lock& js) {
+  return getCacheModeName(cacheMode);
+}
+Request::CacheMode Request::getCacheMode() {
+  return cacheMode;
+}
+
 jsg::Ref<Request> Request::constructor(
     jsg::Lock& js, Request::Info input, jsg::Optional<Request::Initializer> init) {
   kj::String url;
@@ -886,6 +918,7 @@ jsg::Ref<Request> Request::constructor(
   CfProperty cf;
   kj::Maybe<Body::ExtractedBody> body;
   Redirect redirect = Redirect::FOLLOW;
+  CacheMode cacheMode = CacheMode::NONE;
 
   KJ_SWITCH_ONEOF(input) {
     KJ_CASE_ONEOF(u, kj::String) {
@@ -951,6 +984,7 @@ jsg::Ref<Request> Request::constructor(
           body = Body::ExtractedBody((oldJsBody)->detach(js), oldRequest->getBodyBuffer(js));
         }
       }
+      cacheMode = oldRequest->getCacheMode();
       redirect = oldRequest->getRedirectEnum();
       fetcher = oldRequest->getFetcher();
       signal = oldRequest->getSignal();
@@ -1028,6 +1062,10 @@ jsg::Ref<Request> Request::constructor(
               "response status code).");
         }
 
+        KJ_IF_SOME(c, initDict.cache) {
+          cacheMode = getCacheModeFromName(c);
+        }
+
         if (initDict.method != kj::none || initDict.body != kj::none) {
           // We modified at least one of the method or the body. In this case, we enforce the
           // spec rule that GET/HEAD requests cannot have bodies. (On the other hand, if neither
@@ -1042,6 +1080,7 @@ jsg::Ref<Request> Request::constructor(
       KJ_CASE_ONEOF(otherRequest, jsg::Ref<Request>) {
         method = otherRequest->method;
         redirect = otherRequest->redirect;
+        cacheMode = otherRequest->cacheMode;
         fetcher = otherRequest->getFetcher();
         signal = otherRequest->getSignal();
         headers = jsg::alloc<Headers>(*otherRequest->headers);
@@ -1062,7 +1101,7 @@ jsg::Ref<Request> Request::constructor(
 
   // TODO(conform): If `init` has a keepalive flag, pass it to the Body constructor.
   return jsg::alloc<Request>(method, url, redirect, KJ_ASSERT_NONNULL(kj::mv(headers)),
-      kj::mv(fetcher), kj::mv(signal), kj::mv(cf), kj::mv(body));
+      kj::mv(fetcher), kj::mv(signal), kj::mv(cf), kj::mv(body), cacheMode);
 }
 
 jsg::Ref<Request> Request::clone(jsg::Lock& js) {
@@ -1143,7 +1182,55 @@ void Request::shallowCopyHeadersTo(kj::HttpHeaders& out) {
 }
 
 kj::Maybe<kj::String> Request::serializeCfBlobJson(jsg::Lock& js) {
-  return cf.serialize(js);
+  if (cacheMode == CacheMode::NONE) {
+    return cf.serialize(js);
+  }
+
+  CfProperty clone;
+  KJ_IF_SOME(obj, cf.get(js)) {
+    (void)obj;
+    clone = cf.deepClone(js);
+  } else {
+    clone = CfProperty(js, js.obj());
+  }
+  auto obj = KJ_ASSERT_NONNULL(clone.get(js));
+
+  int ttl = 2;
+  switch (cacheMode) {
+    case CacheMode::NOSTORE:
+      ttl = -1;
+      obj.set(js, "cf-cache-level", js.str("byc"_kjc));
+      break;
+    case CacheMode::NOCACHE:
+      ttl = 0;
+      KJ_FALLTHROUGH;
+    case CacheMode::NONE:
+      KJ_UNREACHABLE;
+  }
+
+  if (obj.has(js, "cacheTtl")) {
+    jsg::JsValue oldTtl = obj.get(js, "cacheTtl");
+    JSG_REQUIRE(oldTtl == js.num(ttl), TypeError,
+        kj::str("CacheTtl: ", oldTtl, ", is not compatible with cache: ",
+            getCacheModeName(cacheMode).orDefault("none"_kj), " header."));
+  } else {
+    obj.set(js, "cacheTtl", js.num(ttl));
+  }
+
+  return clone.serialize(js);
+}
+
+void RequestInitializerDict::validate(jsg::Lock& js) {
+  KJ_IF_SOME(c, cache) {
+    // Check compatability flag
+    JSG_REQUIRE(FeatureFlags::get(js).getCacheOptionEnabled(), Error,
+        kj::str("The 'cache' field on 'RequestInitializerDict' is not implemented."));
+
+    // Validate that the cache type is valid
+    auto cacheMode = getCacheModeFromName(c);
+    JSG_REQUIRE(cacheMode != Request::CacheMode::NOCACHE, TypeError,
+        kj::str("Unsupported cache mode: ", c));
+  }
 }
 
 void Request::serialize(jsg::Lock& js,
@@ -1180,9 +1267,11 @@ void Request::serialize(jsg::Lock& js,
 
             .cf = cf.getRef(js),
 
+            .cache = getCacheModeName(cacheMode).map(
+                [](kj::StringPtr name) -> kj::String { return kj::str(name); }),
+
             // .mode is unimplemented
             // .credentials is unimplemented
-            // .cache is unimplemented
             // .referrer is unimplemented
             // .referrerPolicy is unimplemented
             // .integrity is required to be empty
@@ -1751,6 +1840,28 @@ jsg::Promise<jsg::Ref<Response>> fetchImplNoOutputLock(jsg::Lock& js,
 
   kj::HttpHeaders headers(ioContext.getHeaderTable());
   jsRequest->shallowCopyHeadersTo(headers);
+
+  // If the jsRequest has a CacheMode, we need to handle that here.
+  // Currently, the only cache mode we support is undefined and no-store (behind an autogate),
+  // but we will soon support no-cache.
+  auto headerIds = ioContext.getHeaderIds();
+  const auto cacheMode = jsRequest->getCacheMode();
+  switch (cacheMode) {
+    case Request::CacheMode::NOSTORE:
+      KJ_FALLTHROUGH;
+    case Request::CacheMode::NOCACHE:
+      if (headers.get(headerIds.cacheControl) == kj::none) {
+        headers.set(headerIds.cacheControl, "no-cache");
+      }
+      if (headers.get(headerIds.pragma) == kj::none) {
+        headers.set(headerIds.pragma, "no-cache");
+      }
+      KJ_FALLTHROUGH;
+    case Request::CacheMode::NONE:
+      break;
+    default:
+      KJ_UNREACHABLE;
+  }
 
   kj::String url =
       uriEncodeControlChars(urlList.back().toString(kj::Url::HTTP_PROXY_REQUEST).asBytes());
