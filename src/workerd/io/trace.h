@@ -189,13 +189,16 @@ class InvocationSpanContext final {
       TraceId traceId,
       TraceId invocationId,
       SpanId spanId,
-      kj::Maybe<const InvocationSpanContext&> parentSpanContext = kj::none);
+      kj::Maybe<const InvocationSpanContext&> parentSpanContext,
+      kj::Maybe<uint8_t> traceFlags);
   // Still need a constructor to be available as long as span context is not propagated everywhere
   // we need it.
-  InvocationSpanContext(TraceId traceId, TraceId invocationId, SpanId spanId)
+  InvocationSpanContext(
+      TraceId traceId, TraceId invocationId, SpanId spanId, kj::Maybe<uint8_t> traceFlags)
       : traceId(traceId),
         invocationId(invocationId),
-        spanId(spanId) {};
+        spanId(spanId),
+        traceFlags(traceFlags) {};
 
   KJ_DISALLOW_COPY(InvocationSpanContext);
 
@@ -223,6 +226,12 @@ class InvocationSpanContext final {
       return *p;
     }
     return kj::none;
+  }
+
+  // W3C trace flags propagated from an upstream traceparent. kj::none when
+  // no upstream sampling decision exists.
+  inline kj::Maybe<uint8_t> getTraceFlags() const {
+    return traceFlags;
   }
 
   // Creates a new child span. If the current context does not have an entropy
@@ -266,12 +275,19 @@ class InvocationSpanContext final {
   // traceId but a different invocationId (unless predictable mode for
   // testing is enabled). The isTrigger() should also return true.
   kj::Maybe<kj::Own<InvocationSpanContext>> parentSpanContext;
+
+  // W3C trace flags from an upstream traceparent, propagated through the
+  // invocation chain. kj::none when no upstream sampling decision was made.
+  kj::Maybe<uint8_t> traceFlags;
 };
 
 // SpanContext as used for streaming tail worker tail events. spanId is always set except for Onset
 // events that don't inherit context from another invocation.
 struct SpanContext {
-  SpanContext(TraceId traceId, kj::Maybe<SpanId> spanId): traceId(traceId), spanId(spanId) {};
+  SpanContext(TraceId traceId, kj::Maybe<SpanId> spanId, kj::Maybe<uint8_t> traceFlags = kj::none)
+      : traceId(traceId),
+        spanId(spanId),
+        traceFlags(traceFlags) {};
   KJ_DISALLOW_COPY(SpanContext);
   SpanContext(SpanContext&& other) = default;
   SpanContext& operator=(SpanContext&& other) = default;
@@ -288,10 +304,17 @@ struct SpanContext {
     return spanId;
   }
 
+  // W3C trace flags from an upstream traceparent. kj::none when no upstream
+  // sampling decision was made (e.g. subrequest propagation without a
+  // worker_tracing header). Bit 0 = sampled.
+  inline kj::Maybe<uint8_t> getTraceFlags() const {
+    return traceFlags;
+  }
+
   static SpanContext fromCapnp(rpc::SpanContext::Reader reader);
   void toCapnp(rpc::SpanContext::Builder writer) const;
   static SpanContext clone(const SpanContext& ctx) {
-    return SpanContext(ctx.traceId, ctx.spanId);
+    return SpanContext(ctx.traceId, ctx.spanId, ctx.traceFlags);
   }
 
   // Parse a W3C traceparent string into a SpanContext.
@@ -301,6 +324,7 @@ struct SpanContext {
  private:
   TraceId traceId;
   kj::Maybe<SpanId> spanId;
+  kj::Maybe<uint8_t> traceFlags;
 };
 
 kj::String KJ_STRINGIFY(const SpanId& id);
@@ -835,7 +859,8 @@ struct TailEvent final {
       kj::Maybe<SpanId> spanId,
       kj::Date timestamp,
       kj::uint sequence,
-      Event&& event);
+      Event&& event,
+      kj::Maybe<uint8_t> traceFlags = kj::none);
   TailEvent(rpc::Trace::TailEvent::Reader reader);
   TailEvent(TailEvent&&) = default;
   TailEvent& operator=(TailEvent&&) = default;
