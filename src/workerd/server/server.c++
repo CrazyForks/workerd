@@ -4306,7 +4306,7 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
           return kj::heap<IoChannelCapTableEntry>(
               IoChannelCapTableEntry::SUBREQUEST, channelNumber);
         } else if (auto channel = dynamic_cast<ActorClass*>(entry.get())) {
-          uint channelNumber = subrequestChannels.size();
+          uint channelNumber = actorClassChannels.size();
           actorClassChannels.add(FutureActorClassChannel{
             .designator = kj::addRef(*channel),
             .errorContext = kj::str("Worker's env"),
