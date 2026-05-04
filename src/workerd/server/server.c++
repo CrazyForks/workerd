@@ -210,8 +210,7 @@ struct Server::GlobalContext {
             server.entropySource,
             headerTableBuilder,
             httpOverCapnpFactory,
-            byteStreamFactory,
-            false /* isFiddle -- TODO(beta): support */),
+            byteStreamFactory),
         headerTable(headerTableBuilder.getFutureTable()) {}
 };
 

@@ -1852,7 +1852,7 @@ void JsRpcTarget::serialize(jsg::Lock& js, jsg::Serializer& serializer) {
       // If no dup() method was present, then what?
       //
       // The pedantic argument would say: we need to throw an exception. But that would lead to a
-      // pretty poor development experience as people would have to fiddle with adding dup()
+      // pretty poor development experience as people would have to mess with adding dup()
       // methods to all their RpcTargets.
       //
       // Another argument might say: we should just use the RpcTarget but never call the disposer
