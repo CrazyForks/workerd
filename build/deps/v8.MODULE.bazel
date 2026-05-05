@@ -59,6 +59,7 @@ PATCHES = [
     "0034-Remove-V8-MODULE.bazel-llvm-toolchain-and-libcxx-rep.patch",
     "0035-Remove-libcxx-dep-from-defs.bzl-not-resolvable-via-h.patch",
     "0036-Fix-non-conforming-braced-init-list-in-value_or.patch",
+    "0037-Fix-non-portable-std-atomic_flag-construction-in-run.patch",
 ]
 
 http_archive(
