@@ -2211,7 +2211,7 @@ class Server::WorkerService final: public Service,
 
     KJ_IF_SOME(w, workerTracer) {
       w->setMakeUserRequestSpanFunc(
-          [&w = *w](tracing::TraceId traceId, kj::Maybe<uint8_t> traceFlags) {
+          [&w = *w](tracing::TraceId traceId, kj::Maybe<tracing::TraceFlags> traceFlags) {
         return SpanParent(kj::refcounted<UserSpanObserver>(
             kj::refcounted<SequentialSpanSubmitter>(w.getWeakRef()), kj::mv(traceId), traceFlags));
       });

@@ -138,12 +138,11 @@ KJ_TEST("InvocationSpanContext propagates traceFlags from trigger") {
   FakeEntropySource fakeEntropySource;
 
   // Trigger with traceFlags set — propagates to new invocation
-  auto trigger =
-      InvocationSpanContext(TraceId(1, 2), TraceId(3, 4), SpanId(5), static_cast<uint8_t>(0x01));
-  KJ_EXPECT(KJ_ASSERT_NONNULL(trigger.getTraceFlags()) == 0x01);
+  auto trigger = InvocationSpanContext(TraceId(1, 2), TraceId(3, 4), SpanId(5), TraceFlags(0x01));
+  KJ_EXPECT(KJ_ASSERT_NONNULL(trigger.getTraceFlags()) == TraceFlags(0x01));
 
   auto sc = InvocationSpanContext::newForInvocation(trigger, fakeEntropySource);
-  KJ_EXPECT(KJ_ASSERT_NONNULL(sc.getTraceFlags()) == 0x01);
+  KJ_EXPECT(KJ_ASSERT_NONNULL(sc.getTraceFlags()) == TraceFlags(0x01));
 
   // No trigger — traceFlags is absent
   auto sc2 = InvocationSpanContext::newForInvocation(kj::none, fakeEntropySource);
@@ -151,7 +150,7 @@ KJ_TEST("InvocationSpanContext propagates traceFlags from trigger") {
 
   // newChild() propagates traceFlags
   auto child = sc.newChild();
-  KJ_EXPECT(KJ_ASSERT_NONNULL(child.getTraceFlags()) == 0x01);
+  KJ_EXPECT(KJ_ASSERT_NONNULL(child.getTraceFlags()) == TraceFlags(0x01));
 
   auto child2 = sc2.newChild();
   KJ_EXPECT(child2.getTraceFlags() == kj::none);
@@ -162,26 +161,24 @@ KJ_TEST("InvocationSpanContext traceFlags capnp round-trip and newChild propagat
   FakeEntropySource fakeEntropySource;
 
   // traceFlags=0x01 (sampled) survives round-trip and propagates through newChild
-  auto sampled =
-      InvocationSpanContext(TraceId(1, 2), TraceId(3, 4), SpanId(5), static_cast<uint8_t>(0x01));
+  auto sampled = InvocationSpanContext(TraceId(1, 2), TraceId(3, 4), SpanId(5), TraceFlags(0x01));
   capnp::MallocMessageBuilder b1;
   sampled.toCapnp(b1.initRoot<rpc::InvocationSpanContext>());
   auto rt1 =
       KJ_ASSERT_NONNULL(InvocationSpanContext::fromCapnp(b1.getRoot<rpc::InvocationSpanContext>()));
-  KJ_EXPECT(KJ_ASSERT_NONNULL(rt1.getTraceFlags()) == 0x01);
+  KJ_EXPECT(KJ_ASSERT_NONNULL(rt1.getTraceFlags()) == TraceFlags(0x01));
   auto child1 = InvocationSpanContext::newForInvocation(rt1, fakeEntropySource);
-  KJ_EXPECT(KJ_ASSERT_NONNULL(child1.newChild().getTraceFlags()) == 0x01);
+  KJ_EXPECT(KJ_ASSERT_NONNULL(child1.newChild().getTraceFlags()) == TraceFlags(0x01));
 
   // traceFlags=0x00 (unsampled) is distinct from absent
-  auto unsampled =
-      InvocationSpanContext(TraceId(1, 2), TraceId(3, 4), SpanId(5), static_cast<uint8_t>(0x00));
+  auto unsampled = InvocationSpanContext(TraceId(1, 2), TraceId(3, 4), SpanId(5), TraceFlags(0x00));
   capnp::MallocMessageBuilder b2;
   unsampled.toCapnp(b2.initRoot<rpc::InvocationSpanContext>());
   auto rt2 =
       KJ_ASSERT_NONNULL(InvocationSpanContext::fromCapnp(b2.getRoot<rpc::InvocationSpanContext>()));
-  KJ_EXPECT(KJ_ASSERT_NONNULL(rt2.getTraceFlags()) == 0x00);
+  KJ_EXPECT(KJ_ASSERT_NONNULL(rt2.getTraceFlags()) == TraceFlags(0x00));
   auto child2 = InvocationSpanContext::newForInvocation(rt2, fakeEntropySource);
-  KJ_EXPECT(KJ_ASSERT_NONNULL(child2.newChild().getTraceFlags()) == 0x00);
+  KJ_EXPECT(KJ_ASSERT_NONNULL(child2.newChild().getTraceFlags()) == TraceFlags(0x00));
 
   // traceFlags absent stays absent
   auto absent = InvocationSpanContext(TraceId(1, 2), TraceId(3, 4), SpanId(5), kj::none);
@@ -216,8 +213,8 @@ KJ_TEST("SpanContext") {
 }
 
 KJ_TEST("SpanContext traceFlags preserved through capnp when set, absent when unset") {
-  auto sc = SpanContext(TraceId(1, 2), SpanId(3), static_cast<uint8_t>(0x01));
-  KJ_EXPECT(KJ_ASSERT_NONNULL(sc.getTraceFlags()) == 0x01);
+  auto sc = SpanContext(TraceId(1, 2), SpanId(3), TraceFlags(0x01));
+  KJ_EXPECT(KJ_ASSERT_NONNULL(sc.getTraceFlags()) == TraceFlags(0x01));
 
   capnp::MallocMessageBuilder builder;
   auto root = builder.initRoot<rpc::SpanContext>();
@@ -226,7 +223,7 @@ KJ_TEST("SpanContext traceFlags preserved through capnp when set, absent when un
   auto sc2 = SpanContext::fromCapnp(root.asReader());
   KJ_EXPECT(sc2.getTraceId() == TraceId(1, 2));
   KJ_EXPECT(KJ_ASSERT_NONNULL(sc2.getSpanId()) == SpanId(3));
-  KJ_EXPECT(KJ_ASSERT_NONNULL(sc2.getTraceFlags()) == 0x01);
+  KJ_EXPECT(KJ_ASSERT_NONNULL(sc2.getTraceFlags()) == TraceFlags(0x01));
 
   auto sc3 = SpanContext(TraceId(4, 5), SpanId(6));
   capnp::MallocMessageBuilder builder2;

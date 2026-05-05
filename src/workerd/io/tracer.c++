@@ -525,7 +525,7 @@ void WorkerTracer::setWorkerAttribute(kj::ConstString key, Span::TagValue value)
 }
 
 SpanParent BaseTracer::makeUserRequestSpan(
-    tracing::TraceId traceId, kj::Maybe<uint8_t> traceFlags) {
+    tracing::TraceId traceId, kj::Maybe<tracing::TraceFlags> traceFlags) {
   KJ_IF_SOME(func, makeUserRequestSpanFunc) {
     return func(kj::mv(traceId), traceFlags);
   } else {

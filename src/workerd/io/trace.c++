@@ -178,7 +178,7 @@ InvocationSpanContext::InvocationSpanContext(kj::Badge<InvocationSpanContext>,
     TraceId invocationId,
     SpanId spanId,
     kj::Maybe<const InvocationSpanContext&> parentSpanContext,
-    kj::Maybe<uint8_t> traceFlags)
+    kj::Maybe<TraceFlags> traceFlags)
     : entropySource(entropySource),
       traceId(kj::mv(traceId)),
       invocationId(kj::mv(invocationId)),
@@ -200,7 +200,7 @@ InvocationSpanContext InvocationSpanContext::newForInvocation(
     kj::Maybe<const InvocationSpanContext&> triggerContext,
     kj::Maybe<kj::EntropySource&> entropySource) {
   kj::Maybe<const InvocationSpanContext&> parent;
-  kj::Maybe<uint8_t> flags;
+  kj::Maybe<TraceFlags> flags;
   auto traceId = triggerContext
                      .map([&](auto& ctx) mutable {
     parent = ctx;
@@ -229,9 +229,9 @@ kj::Maybe<InvocationSpanContext> InvocationSpanContext::fromCapnp(
     return kj::none;
   }
 
-  kj::Maybe<uint8_t> flags;
+  kj::Maybe<TraceFlags> flags;
   if (reader.getTraceFlags().isValue()) {
-    flags = reader.getTraceFlags().getValue();
+    flags = TraceFlags(reader.getTraceFlags().getValue());
   }
 
   auto sc = InvocationSpanContext(kj::Badge<InvocationSpanContext>(), kj::none,
@@ -312,9 +312,9 @@ SpanContext SpanContext::fromCapnp(rpc::SpanContext::Reader reader) {
     spanId = info.getSpanId();
   }
 
-  kj::Maybe<uint8_t> flags;
+  kj::Maybe<TraceFlags> flags;
   if (reader.getTraceFlags().isValue()) {
-    flags = reader.getTraceFlags().getValue();
+    flags = TraceFlags(reader.getTraceFlags().getValue());
   }
 
   return SpanContext(TraceId::fromCapnp(reader.getTraceId()), spanId, flags);
@@ -365,7 +365,7 @@ kj::Maybe<SpanContext> SpanContext::tryFromTraceparent(kj::StringPtr tp) {
 
   if (version != 0 || (traceHigh == 0 && traceLow == 0) || parentId == 0) return kj::none;
 
-  return SpanContext(TraceId(traceLow, traceHigh), SpanId(parentId), flags);
+  return SpanContext(TraceId(traceLow, traceHigh), SpanId(parentId), TraceFlags(flags));
 }
 
 kj::String KJ_STRINGIFY(const SpanContext& context) {
@@ -1480,7 +1480,7 @@ TailEvent::TailEvent(TraceId traceId,
     kj::Date timestamp,
     kj::uint sequence,
     Event&& event,
-    kj::Maybe<uint8_t> traceFlags)
+    kj::Maybe<TraceFlags> traceFlags)
     : spanContext(kj::mv(traceId), kj::mv(spanId), kj::mv(traceFlags)),
       invocationId(kj::mv(invocationId)),
       timestamp(timestamp),

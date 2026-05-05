@@ -79,9 +79,11 @@ class BaseTracer: public kj::Refcounted {
   // be available afterwards.
   virtual void recordTimestamp(kj::Date timestamp) = 0;
 
-  SpanParent makeUserRequestSpan(tracing::TraceId traceId, kj::Maybe<uint8_t> traceFlags);
+  SpanParent makeUserRequestSpan(
+      tracing::TraceId traceId, kj::Maybe<tracing::TraceFlags> traceFlags);
 
-  using MakeUserRequestSpanFunc = kj::Function<SpanParent(tracing::TraceId, kj::Maybe<uint8_t>)>;
+  using MakeUserRequestSpanFunc =
+      kj::Function<SpanParent(tracing::TraceId, kj::Maybe<tracing::TraceFlags>)>;
 
   // Allow setting the user request span after the tracer has been created so its observer can
   // reference the tracer. This can only be set once.
@@ -240,7 +242,7 @@ class UserSpanObserver final: public SpanObserver {
   // constructor for top-level observer with trace ID and optional trace flags
   UserSpanObserver(kj::Own<SpanSubmitter> submitter,
       tracing::TraceId traceId,
-      kj::Maybe<uint8_t> traceFlags = kj::none)
+      kj::Maybe<tracing::TraceFlags> traceFlags = kj::none)
       : submitter(kj::mv(submitter)),
         spanId(tracing::SpanId::nullId),
         parentSpanId(tracing::SpanId::nullId),
@@ -252,7 +254,7 @@ class UserSpanObserver final: public SpanObserver {
   UserSpanObserver(kj::Own<SpanSubmitter> submitter,
       tracing::SpanId parentSpanId,
       tracing::TraceId traceId,
-      kj::Maybe<uint8_t> traceFlags,
+      kj::Maybe<tracing::TraceFlags> traceFlags,
       bool fromUserCode = false)
       : submitter(kj::mv(submitter)),
         spanId(this->submitter->makeSpanId()),
@@ -280,7 +282,7 @@ class UserSpanObserver final: public SpanObserver {
   kj::Date startTime = kj::UNIX_EPOCH;
   // Allow the submitter to reject spans, causing them to not be reported.
   bool wasAccepted = true;
-  kj::Maybe<uint8_t> traceFlags;
+  kj::Maybe<tracing::TraceFlags> traceFlags;
   // True only for spans created directly via `ctx.tracing.enterSpan`. Not inherited by
   // children created via `newChild()` — runtime sub-operations nested inside an enterSpan
   // callback (e.g. `kv_get`) should remain subject to runtime-span policies.
