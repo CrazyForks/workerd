@@ -58,6 +58,7 @@ PATCHES = [
     "0033-Return-false-on-Object.hasOwnProperty-with-intercept.patch",
     "0034-Remove-V8-MODULE.bazel-llvm-toolchain-and-libcxx-rep.patch",
     "0035-Remove-libcxx-dep-from-defs.bzl-not-resolvable-via-h.patch",
+    "0036-Fix-non-conforming-braced-init-list-in-value_or.patch",
 ]
 
 http_archive(
