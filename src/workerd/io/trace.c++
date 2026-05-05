@@ -230,8 +230,8 @@ kj::Maybe<InvocationSpanContext> InvocationSpanContext::fromCapnp(
   }
 
   kj::Maybe<TraceFlags> flags;
-  if (reader.getTraceFlags().isValue()) {
-    flags = TraceFlags(reader.getTraceFlags().getValue());
+  if (reader.hasTraceFlags() && reader.getTraceFlags().getValue().isSet()) {
+    flags = TraceFlags(reader.getTraceFlags().getValue().getSet());
   }
 
   auto sc = InvocationSpanContext(kj::Badge<InvocationSpanContext>(), kj::none,
@@ -247,7 +247,7 @@ void InvocationSpanContext::toCapnp(rpc::InvocationSpanContext::Builder writer) 
   invocationId.toCapnp(writer.initInvocationId());
   writer.setSpanId(spanId);
   KJ_IF_SOME(flags, traceFlags) {
-    writer.getTraceFlags().setValue(flags);
+    writer.initTraceFlags().getValue().setSet(flags);
   }
 }
 
@@ -313,8 +313,8 @@ SpanContext SpanContext::fromCapnp(rpc::SpanContext::Reader reader) {
   }
 
   kj::Maybe<TraceFlags> flags;
-  if (reader.getTraceFlags().isValue()) {
-    flags = TraceFlags(reader.getTraceFlags().getValue());
+  if (reader.hasTraceFlags() && reader.getTraceFlags().getValue().isSet()) {
+    flags = TraceFlags(reader.getTraceFlags().getValue().getSet());
   }
 
   return SpanContext(TraceId::fromCapnp(reader.getTraceId()), spanId, flags);
@@ -327,7 +327,7 @@ void SpanContext::toCapnp(rpc::SpanContext::Builder writer) const {
     info.setSpanId(s);
   }
   KJ_IF_SOME(flags, traceFlags) {
-    writer.getTraceFlags().setValue(flags);
+    writer.initTraceFlags().getValue().setSet(flags);
   }
 }
 
