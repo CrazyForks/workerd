@@ -20,7 +20,7 @@ interface D1Meta {
   served_by_region?: string;
 
   /**
-   * The three letters airport code of the colo that executed the query.
+   * The three-letter airport code of the colo that executed the query.
    */
   served_by_colo?: string;
 
