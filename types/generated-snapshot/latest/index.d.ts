@@ -15234,7 +15234,8 @@ interface WorkflowInstanceRestartOptions {
      */
     name: string;
     /**
-     * 1-indexed occurrence of this step name. Defaults to 1. Use when the same step name appears multiple times (e.g. in a loop).
+     * 1-indexed occurrence of this step name. Use when the same step name appears multiple times (e.g. in a loop).
+     * @default 1
      */
     count?: number;
     /**
