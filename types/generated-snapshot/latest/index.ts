@@ -11196,7 +11196,11 @@ export interface ArtifactsTokenListResult {
   /** Total number of tokens for the repository. */
   total: number;
 }
-/** Handle for a single repository. Returned by Artifacts.get(). */
+/**
+ * Handle for a single repository. Returned by Artifacts.get().
+ *
+ * Methods may throw `ArtifactsError` with code `INTERNAL_ERROR` if an unexpected service error occurs.
+ */
 export interface ArtifactsRepo extends ArtifactsRepoInfo {
   /**
    * Create an access token for this repo.
@@ -11269,7 +11273,11 @@ export interface ArtifactsError extends Error {
   readonly numericCode: number;
 }
 // ── Binding ──────────────────────────────────────────────────────────────────
-/** Artifacts binding — namespace-level operations. */
+/**
+ * Artifacts binding — namespace-level operations.
+ *
+ * Methods may throw `ArtifactsError` with code `INTERNAL_ERROR` if an unexpected service error occurs.
+ */
 export interface Artifacts {
   /**
    * Create a new repository with an initial access token.
@@ -11302,6 +11310,11 @@ export interface Artifacts {
    * @returns Repo metadata with initial token.
    * @throws {ArtifactsError} with code `INVALID_REPO_NAME` if the target name is invalid.
    * @throws {ArtifactsError} with code `INVALID_INPUT` if the source URL is not valid HTTPS.
+   * @throws {ArtifactsError} with code `INVALID_URL` if the source URL does not point to a git repository.
+   * @throws {ArtifactsError} with code `REMOTE_AUTH_REQUIRED` if the remote requires authentication.
+   * @throws {ArtifactsError} with code `NOT_FOUND` if the remote repository does not exist.
+   * @throws {ArtifactsError} with code `UPSTREAM_UNAVAILABLE` if the remote cannot be reached.
+   * @throws {ArtifactsError} with code `MEMORY_LIMIT` if the import exceeds service memory limits.
    * @throws {ArtifactsError} with code `ALREADY_EXISTS` if the target repo already exists.
    */
   import(params: {
